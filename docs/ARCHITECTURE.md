@@ -11,7 +11,7 @@ below is one file in `Sources/AutoPauseMacApps/`.
                 │ observes
 ┌───────────────▼──────────────────────────────────────────────┐
 │  AppListModel.swift      the single source of truth           │
-│    · merges apps + services + sleeping records into one list  │
+│    · merges running apps + sleeping records into one list     │
 │    · owns history sampling, auto-pause, Local Model Mode      │
 └──┬────────────┬───────────────┬──────────────┬───────────────┘
    │            │               │              │
@@ -128,7 +128,7 @@ All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable acro
 
 | File | Role |
 |---|---|
-| `MenuView.swift` | The panel: ring gauge, system usage graph, and the list in three sections — SUSPENDED, APPS, BACKGROUND SERVICES. Sizes itself to the screen height (a `ScrollView` has no intrinsic size, so it needs an explicit height or the window collapses). |
+| `MenuView.swift` | The panel: ring gauge, system usage graph, and the list in two sections: SUSPENDED and APPS. The list gets an explicit height computed from the row and section counts, capped at the screen height (a `ScrollView` has no intrinsic size, so without an explicit height the window collapses; computing rather than measuring keeps the size stable across refreshes). |
 | `DetailViews.swift` | `SparklineView`, `UsageAreaChart` (plotted against total RAM so normal fluctuation looks normal, not like a mountain range), and the per-app detail popover with auto-pause settings. |
 | `SystemDetailView.swift` | Ring gauge, usage history, App/Wired/Compressed/Free/Swap breakdown, top processes. |
 | `ReclaimView.swift` | Free Up Memory: a reviewable checklist of what will be paused, with running totals, before anything happens. Recording and call apps start unticked. Opt-outs can be remembered. |

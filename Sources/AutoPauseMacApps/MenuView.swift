@@ -23,14 +23,18 @@ struct MenuView: View {
                     .foregroundStyle(.secondary)
                     .frame(height: 80)
             } else {
+                let suspended = model.entries.filter { $0.state != .running }
+                let running = model.entries.filter { $0.state == .running }
                 ScrollView {
                     VStack(spacing: 2) {
-                        section("SUSPENDED", model.entries.filter { $0.state != .running })
-                        section("APPS", model.entries.filter { $0.state == .running })
+                        section("SUSPENDED", suspended)
+                        section("APPS", running)
                     }
                     .padding(6)
                 }
-                .frame(height: maxListHeight)
+                // An explicit height, not maxHeight: a ScrollView has no intrinsic size, so
+                // the MenuBarExtra window would collapse it.
+                .frame(height: listHeight(sections: [suspended.count, running.count]))
             }
             Divider()
             footer
@@ -214,11 +218,22 @@ struct MenuView: View {
         .onAppear { launchAtLogin = LaunchAtLogin.isEnabled }
     }
 
-    /// Fills available vertical space up to the screen's height, rather than an arbitrary cap.
-    private var maxListHeight: CGFloat {
+    /// Tall enough for every row, capped at the screen. Computed from row counts with fixed
+    /// metrics rather than measured, so the window keeps its size across the periodic refresh
+    /// unless the number of rows changes.
+    private func listHeight(sections rowCounts: [Int]) -> CGFloat {
+        let rowHeight: CGFloat = 39    // two text lines + vertical padding
+        let headerHeight: CGFloat = 19 // section title + its padding
+        let spacing: CGFloat = 2
+        let rows = rowCounts.reduce(0, +)
+        let headers = rowCounts.filter { $0 > 0 }.count
+        let contentHeight = CGFloat(rows) * rowHeight
+            + CGFloat(headers) * headerHeight
+            + CGFloat(max(0, rows + headers - 1)) * spacing
+            + 12 // VStack padding
         let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
         let chromeHeight: CGFloat = 210 // header + usage graph + divider + footer + padding
-        return max(200, screenHeight - chromeHeight)
+        return min(contentHeight, max(200, screenHeight - chromeHeight))
     }
 
     static func fmt(_ bytes: UInt64) -> String {

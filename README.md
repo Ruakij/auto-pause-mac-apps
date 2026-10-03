@@ -39,15 +39,13 @@ no telemetry, and no paid tier. There is nothing to buy.
 | **Running a local LLM** (Ollama, LM Studio, llama.cpp) and there isn't enough free RAM | Open **Free Up Memory**, set a target of 8 GB, click once | Enough headroom to load the model, then one click to restore everything |
 | **Chrome or Edge is eating 6 GB** while you work in another app | Pause the browser | Gigabytes back, every tab exactly where it was when you resume |
 | **Claude, Codex, Cursor and Docker all open at once** and your Mac starts swapping | Pause the two you aren't touching | Memory pressure drops out of the red without closing anything |
-| **A forgotten `node` or `bun` dev server** is holding hundreds of MB | Freeze it from the Background Services list | RAM back without hunting for the process in Activity Monitor |
-| **Adobe, Dropbox and updater daemons** idling in the background | Freeze them | Memory back; unfreeze whenever you actually need them |
 | **You're on battery and want it to last** | Pause background apps | They stop consuming CPU entirely, not just "less" |
 
 ---
 
 ## Screenshots
 
-### The main panel — every app and service, ranked by real memory use
+### The main panel — every app, ranked by real memory use
 
 ![Auto Pause Mac Apps menu bar panel on macOS showing four frozen apps pinned at the top and running apps including Microsoft Edge at 3.22 GB and Claude at 2.03 GB with live memory sparklines](docs/screenshots/main-panel.png)
 
