@@ -9,6 +9,19 @@ struct AppSettings: Codable, Equatable {
     var excludedFromReclaim: Bool = false
 }
 
+extension AppSettings {
+    // The synthesized decoder ignores property defaults and throws on a missing key, which
+    // drops the whole settings file whenever a field is added. Every field but bundleID
+    // falls back to the property default above.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(bundleID: try c.decode(String.self, forKey: .bundleID))
+        autoPauseEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoPauseEnabled) ?? autoPauseEnabled
+        autoPauseMinutes = try c.decodeIfPresent(Int.self, forKey: .autoPauseMinutes) ?? autoPauseMinutes
+        excludedFromReclaim = try c.decodeIfPresent(Bool.self, forKey: .excludedFromReclaim) ?? excludedFromReclaim
+    }
+}
+
 /// Global, one-off flags.
 enum PauseFlags {
     private static let seenDeepSleepWarningKey = "PauseHasSeenDeepSleepWarning"
