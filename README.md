@@ -265,6 +265,8 @@ it tells you instead of silently failing.
 ### ⏱ Auto-pause when idle
 
 Per app, off by default: freeze automatically after N minutes in the background, thaw on return.
+The idle check runs every 30 seconds whether or not the panel is open. Bringing any frozen app
+to the front (Dock click, Cmd-Tab, `open -a`) thaws it, however it was frozen.
 
 ---
 

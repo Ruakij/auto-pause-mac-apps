@@ -84,6 +84,17 @@ normal save sheet and stay open; Pause reports `.refused` and leaves them merely
 
 `@MainActor ObservableObject`, refreshed every 3 s while the panel is open.
 
+- **Auto-pause** — `evaluateAutoPause()` runs on a separate 30 s policy timer (10 s tolerance)
+  that runs whether or not the panel is open, and at the start of every refresh. It freezes an
+  app with auto-pause enabled that is not frontmost and has not been frontmost for its
+  configured minutes. It skips the UI-only work (history sampling, `SystemStats`).
+- **Thaw on activation** — when `didActivateApplicationNotification` names a frozen pid (in
+  `PausedStore` or stopped), the whole tree is resumed, its record dropped, its idle clock
+  reset and the pid removed from `reclaimSession`. This covers every frozen app, whether
+  auto-paused, paused by hand or by Free Up Memory. The notification arrives while the app is
+  still stopped; requests that go through the app itself (`NSRunningApplication.activate()`,
+  `osascript ... activate`) produce no notification and are lost.
+
 - **Three states** per entry: `.running`, `.paused` (SIGSTOP), `.sleeping` (quit, resumable).
 - **Apps only.** Entries come solely from `NSWorkspace.runningApplications` filtered to
   `.regular`, so daemons never enter the list.

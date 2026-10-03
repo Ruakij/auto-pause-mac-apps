@@ -48,6 +48,8 @@ final class AppListModel: ObservableObject {
     private var lastFrontDate: [pid_t: Date] = [:]
 
     private var timer: Timer?
+    /// Auto-pause runs on its own timer so it fires with the panel closed.
+    private var policyTimer: Timer?
     private var observers: [NSObjectProtocol] = []
 
     init() {
@@ -61,9 +63,29 @@ final class AppListModel: ObservableObject {
         observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
                                              object: nil, queue: .main) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            Task { @MainActor in self?.lastFrontDate[app.processIdentifier] = Date() }
+            Task { @MainActor in self?.didActivate(pid: app.processIdentifier) }
         })
         refresh()
+        policyTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.evaluateAutoPause() }
+        }
+        policyTimer?.tolerance = 10
+    }
+
+    /// The activation notification arrives while a frozen app is still stopped, so thawing
+    /// here is what lets a Dock click or Cmd-Tab bring it back. Applies to every frozen app,
+    /// however it was frozen.
+    private func didActivate(pid: pid_t) {
+        if ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid) {
+            ProcessControl.resumeTree(root: pid)
+            PausedStore.shared.remove(pid: pid)
+            footprintAtPause[pid] = nil
+            reclaimSession.removeAll { $0 == pid }
+            lastFrontDate[pid] = Date()
+            refresh()
+        } else {
+            lastFrontDate[pid] = Date()
+        }
     }
 
     func startRefreshing() {
@@ -84,20 +106,24 @@ final class AppListModel: ObservableObject {
         return NSRunningApplication(processIdentifier: pid)
     }
 
-    func refresh() {
+    private func listedApps() -> [NSRunningApplication] {
         let ownPid = ProcessInfo.processInfo.processIdentifier
-        let apps = NSWorkspace.shared.runningApplications.filter {
+        return NSWorkspace.shared.runningApplications.filter {
             $0.activationPolicy == .regular
                 && $0.processIdentifier != ownPid
                 && $0.bundleIdentifier != "com.apple.finder"
         }
+    }
+
+    func refresh() {
+        evaluateAutoPause(refreshAfter: false)
+        let apps = listedApps()
 
         PausedStore.shared.pruneStale(currentApps: apps.map { ($0.processIdentifier, $0.launchDate) })
         SleptStore.shared.prune(runningBundleIDs: Set(apps.compactMap(\.bundleIdentifier)))
 
         let livePids = Set(apps.map(\.processIdentifier))
         history = history.filter { livePids.contains($0.key) }
-        lastFrontDate = lastFrontDate.filter { livePids.contains($0.key) }
         footprintAtPause = footprintAtPause.filter { livePids.contains($0.key) }
 
         var newEntries: [AppEntry] = []
@@ -106,7 +132,7 @@ final class AppListModel: ObservableObject {
             let pid = app.processIdentifier
             guard pid > 0 else { continue }
 
-            var paused = ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid)
+            let paused = ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid)
             let mem = ProcessControl.treeMemory(root: pid)
 
             if !paused {
@@ -114,16 +140,6 @@ final class AppListModel: ObservableObject {
                 samples.append(mem.resident)
                 if samples.count > historyLimit { samples.removeFirst(samples.count - historyLimit) }
                 history[pid] = samples
-
-                if lastFrontDate[pid] == nil { lastFrontDate[pid] = app.launchDate ?? Date() }
-                if shouldAutoPause(app: app, pid: pid) {
-                    footprintAtPause[pid] = mem.footprint
-                    ProcessControl.pauseTree(root: pid)
-                    PausedStore.shared.add(PausedRecord(
-                        pid: pid, bundleID: app.bundleIdentifier,
-                        name: app.localizedName ?? "Unknown", launchDate: app.launchDate))
-                    paused = true
-                }
             }
 
             // Everything the frozen app has handed back since it was frozen.
@@ -256,11 +272,36 @@ final class AppListModel: ObservableObject {
         AppSettingsStore.shared.update(settings)
     }
 
-    private func shouldAutoPause(app: NSRunningApplication, pid: pid_t) -> Bool {
-        let settings = AppSettingsStore.shared.settings(for: app.bundleIdentifier)
-        guard settings.autoPauseEnabled, !app.isActive else { return false }
-        guard let since = lastFrontDate[pid] else { return false }
-        return Date().timeIntervalSince(since) > TimeInterval(settings.autoPauseMinutes * 60)
+    /// Freezes every app with auto-pause enabled that has been in the background for its
+    /// configured minutes. Runs from the policy tick, so it stays cheap: no history sampling,
+    /// no `SystemStats`, memory read only for apps it actually freezes.
+    private func evaluateAutoPause(refreshAfter: Bool = true) {
+        let apps = listedApps()
+        let livePids = Set(apps.map(\.processIdentifier))
+        lastFrontDate = lastFrontDate.filter { livePids.contains($0.key) }
+
+        var pausedAny = false
+        for app in apps {
+            let pid = app.processIdentifier
+            guard pid > 0 else { continue }
+            if lastFrontDate[pid] == nil { lastFrontDate[pid] = app.launchDate ?? Date() }
+
+            let settings = AppSettingsStore.shared.settings(for: app.bundleIdentifier)
+            guard settings.autoPauseEnabled, !app.isActive else { continue }
+            guard !ProcessControl.isStopped(pid), !PausedStore.shared.contains(pid: pid) else { continue }
+            guard let since = lastFrontDate[pid],
+                  Date().timeIntervalSince(since) > TimeInterval(settings.autoPauseMinutes * 60)
+            else { continue }
+
+            let footprint = ProcessControl.treeMemory(root: pid).footprint
+            guard ProcessControl.pauseTree(root: pid) else { continue }
+            footprintAtPause[pid] = footprint
+            PausedStore.shared.add(PausedRecord(
+                pid: pid, bundleID: app.bundleIdentifier,
+                name: app.localizedName ?? "Unknown", launchDate: app.launchDate))
+            pausedAny = true
+        }
+        if pausedAny && refreshAfter { refresh() }
     }
 
     // MARK: - Actions
