@@ -8,6 +8,24 @@ cd "$(dirname "$0")"
 UNIVERSAL=0
 [[ "$1" == "--universal" ]] && UNIVERSAL=1
 
+# Some Command Line Tools SDKs ship SwiftUI without its macro plugin, so @State fails to
+# compile. SDKROOT set by the caller wins; otherwise fall back to the newest installed
+# SDK that can compile a @State property.
+if [[ -z "$SDKROOT" ]]; then
+  PROBE=$(mktemp -d)
+  print 'import SwiftUI\nstruct V: View { @State var x = 0; var body: some View { Text("") } }' > "$PROBE/p.swift"
+  if ! swiftc -typecheck "$PROBE/p.swift" >/dev/null 2>&1; then
+    for sdk in $(ls -d "$(dirname "$(xcrun --show-sdk-path)")"/MacOSX[0-9]*.sdk | sort -rV); do
+      if SDKROOT="$sdk" swiftc -typecheck "$PROBE/p.swift" >/dev/null 2>&1; then
+        export SDKROOT="$sdk"
+        echo "▸ Default SDK cannot compile SwiftUI macros, using $SDKROOT"
+        break
+      fi
+    done
+  fi
+  rm -rf "$PROBE"
+fi
+
 APP="Auto Pause Mac Apps.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -15,15 +33,14 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 if (( UNIVERSAL )); then
   # SwiftPM's --arch needs Xcode's xcbuild, which Command Line Tools don't ship.
   # Cross-compile each slice separately and stitch them with lipo instead.
-  echo "▸ Building arm64 slice..."
-  swift build -c release --scratch-path .build-arm64 \
-    -Xswiftc -target -Xswiftc arm64-apple-macosx14.0
-  echo "▸ Building x86_64 slice..."
-  swift build -c release --scratch-path .build-x86_64 \
-    -Xswiftc -target -Xswiftc x86_64-apple-macosx14.0
+  BINS=()
+  for arch in arm64 x86_64; do
+    echo "▸ Building $arch slice..."
+    swift build -c release --scratch-path ".build-$arch" --triple "$arch-apple-macosx14.0"
+    BINS+=("$(swift build -c release --scratch-path ".build-$arch" --triple "$arch-apple-macosx14.0" --show-bin-path)/AutoPauseMacApps")
+  done
   echo "▸ Merging into a universal binary..."
-  lipo -create -output "$APP/Contents/MacOS/AutoPauseMacApps" \
-    .build-arm64/release/AutoPauseMacApps .build-x86_64/release/AutoPauseMacApps
+  lipo -create -output "$APP/Contents/MacOS/AutoPauseMacApps" "${BINS[@]}"
 else
   echo "▸ Building for $(uname -m)..."
   swift build -c release

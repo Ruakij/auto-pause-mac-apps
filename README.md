@@ -190,6 +190,16 @@ cd auto-pause-mac-apps
 `build.sh` signs with a Developer ID automatically if you have one installed, and falls back to
 ad-hoc signing if you don't.
 
+Some Command Line Tools SDKs lack the SwiftUI macro plugin (`plugin for module 'SwiftUIMacros'
+not found`). `build.sh` then falls back to the newest installed SDK that works; `SDKROOT=<path to
+a MacOSX*.sdk>` overrides the choice.
+
+`.gitlab-ci.yml` builds the same way on a macOS GitLab runner (tag `macos`, shell executor,
+Command Line Tools): every push and merge request produces the universal app as a zip artifact,
+and a `v*` tag builds the DMG, uploads it to the project's generic package registry and creates a
+GitLab Release linking it. Notarization runs only when the runner has a Developer ID and the
+`AutoPauseNotary` notarytool profile.
+
 ---
 
 ## Features in detail

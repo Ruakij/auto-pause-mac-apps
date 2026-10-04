@@ -1,0 +1,78 @@
+# Builds "Auto Pause Mac Apps.app" and publishes tagged releases.
+#
+# Assumptions about the runner (to be confirmed):
+# - A macOS runner registered with the tag `macos`, shell executor, Xcode Command Line Tools
+#   installed (full Xcode is not needed). curl, ditto, hdiutil and codesign come with macOS.
+# - Some CLT SDKs lack the SwiftUI macro plugin; build.sh then falls back to an older SDK.
+#   Set the CI/CD variable SDKROOT to pin a specific SDK instead.
+# - Signing is ad-hoc unless a "Developer ID Application" identity is in the runner keychain.
+#   Notarization runs only when that identity and the notarytool keychain profile
+#   $NOTARY_PROFILE (default AutoPauseNotary) both exist on the runner.
+# - Releases use the GitLab API via curl with CI_JOB_TOKEN, so release-cli is not required.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+stages: [build, package, release]
+
+default:
+  tags: [macos]
+
+variables:
+  APP: "Auto Pause Mac Apps.app"
+  PACKAGE_NAME: auto-pause-mac-apps
+
+build:
+  stage: build
+  script:
+    - ./build.sh --universal
+    - ditto -c -k --keepParent "$APP" AutoPauseMacApps.zip
+  artifacts:
+    name: "AutoPauseMacApps-$CI_COMMIT_SHORT_SHA"
+    paths: [AutoPauseMacApps.zip]
+    expire_in: 30 days
+
+package:
+  stage: package
+  needs: []
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+  script:
+    - VERSION="${CI_COMMIT_TAG#v}"
+    - PLIST_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
+    - '[ "$PLIST_VERSION" = "$VERSION" ] || echo "WARNING: tag $VERSION differs from Info.plist version $PLIST_VERSION"'
+    - |
+      if security find-identity -v -p codesigning | grep -q "Developer ID Application" \
+         && xcrun notarytool history --keychain-profile "${NOTARY_PROFILE:-AutoPauseNotary}" >/dev/null 2>&1; then
+        ./notarize.sh "$VERSION"
+      else
+        echo "No Developer ID or notary profile on this runner, skipping notarization"
+        ./package-dmg.sh "$VERSION"
+      fi
+  artifacts:
+    paths: ["AutoPauseMacApps-*.dmg"]
+
+release:
+  stage: release
+  needs: [package]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - VERSION="${CI_COMMIT_TAG#v}"
+    - DMG="AutoPauseMacApps-$VERSION.dmg"
+    - URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$PACKAGE_NAME/$VERSION/$DMG"
+    - curl --fail-with-body --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$DMG" "$URL"
+    - |
+      curl --fail-with-body --request POST \
+        --header "JOB-TOKEN: $CI_JOB_TOKEN" --header "Content-Type: application/json" \
+        --data "{\"name\": \"$CI_COMMIT_TAG\", \"tag_name\": \"$CI_COMMIT_TAG\",
+                 \"assets\": {\"links\": [{\"name\": \"$DMG\", \"url\": \"$URL\",
+                 \"direct_asset_path\": \"/$DMG\", \"link_type\": \"package\"}]}}" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"
