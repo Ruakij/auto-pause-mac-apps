@@ -75,6 +75,8 @@ confirm button.**
 - Your **frontmost app** is never listed.
 - **Auto Pause itself is never listed**, and refuses to freeze any process tree containing
   itself — at the signal layer, not just in the selection logic.
+- **Busy apps** (playing audio, running `git` or a build, computing, ...) start **unticked**
+  with the reason shown, e.g. *"Busy: playing audio"*. Ticking one pauses it anyway.
 - **Recording and call apps** (QuickTime, OBS, ScreenFlow, Loom, Zoom, Teams, Meet, Discord,
   Slack…) start **unticked** and are flagged *"may be recording or in a call"*.
 - **Background services and daemons are never touched** — see below.
@@ -275,8 +277,35 @@ it tells you instead of silently failing.
 ### ⏱ Auto-pause when idle
 
 Per app, off by default: freeze automatically after N minutes in the background, thaw on return.
-The idle check runs every 30 seconds whether or not the panel is open. Bringing any frozen app
-to the front (Dock click, Cmd-Tab, `open -a`) thaws it, however it was frozen.
+Each app has its own timer, counted from the moment it left the front, and it fires whether or
+not the panel is open. A busy app (see below) is not frozen; it is checked again every minute
+until it is idle. The first check of an app measures no CPU yet: it takes a sample and judges
+CPU 30 seconds later. While the camera is in use, screen sharing or Sidecar is active, nothing is
+auto-paused. Bringing any frozen app to the front (Dock click, Cmd-Tab, `open -a`) thaws it,
+however it was frozen.
+
+### Busy apps stay running
+
+An app counts as busy when anything in its process tree is:
+
+- computing (CPU above a threshold, 0.5 % of one core by default),
+- playing or recording sound,
+- keeping the Mac awake (video playback, downloads, `caffeinate`),
+- being debugged,
+- using a serial port, a disk device or an input device directly,
+- intercepting keyboard or mouse input with an event tap,
+- running a command that matches the command list: by default `git`, `ssh`, `rsync`, `curl`,
+  `make`, `cargo`, `npm`, `mvn`, `xcodebuild`, `docker` and similar tools, Gradle builds and
+  Claude Code tool calls. Idle language servers do not match, so an editor with nothing running
+  still counts as idle.
+
+Busy apps are never auto-paused. Clicking Pause or Deep Sleep on one shows what is still
+running in its row (*"Busy: git fetch, playing audio"*) and turns the button into an orange
+**Force**; a second click within 5 seconds goes ahead. Resume and Wake never ask.
+
+Each condition can be switched off in **Settings > Busy apps**, along with the CPU threshold
+and the command list (regular expressions on the full command line; invalid ones are not
+saved). All checks use public APIs and need no permission.
 
 ---
 

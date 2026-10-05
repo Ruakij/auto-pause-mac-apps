@@ -8,6 +8,7 @@ struct MenuView: View {
     @State private var showReclaim = false
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var showSettings = false
+    @State private var showBusySettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -152,8 +153,13 @@ struct MenuView: View {
             }
             .help("Settings")
             .popover(isPresented: $showSettings, arrowEdge: .top) {
-                settingsPanel
+                if showBusySettings {
+                    BusySettingsView(model: model) { showBusySettings = false }
+                } else {
+                    settingsPanel
+                }
             }
+            .onChange(of: showSettings) { _, _ in showBusySettings = false }
 
             Button {
                 NSApp.terminate(nil)
@@ -198,6 +204,18 @@ struct MenuView: View {
             }
 
             Divider()
+
+            Button {
+                showBusySettings = true
+            } label: {
+                HStack {
+                    Label("Busy apps", systemImage: "hourglass").font(.caption)
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
 
             Button {
                 showSettings = false
@@ -249,6 +267,9 @@ private struct AppRow: View {
     @State private var hovering = false
     @State private var showDetail = false
     @State private var showSleepWarning = false
+    /// After a click found the app busy, the matching button turns into Force and the memory
+    /// line shows the findings until the pointer leaves the row or the time runs out.
+    @StateObject private var gate = BusyGate()
 
     var body: some View {
         HStack(spacing: 8) {
@@ -298,18 +319,24 @@ private struct AppRow: View {
             // Deep Sleep — quits the app, freeing everything including swap.
             if entry.canDeepSleep {
                 Button {
-                    if PauseFlags.hasSeenDeepSleepWarning {
-                        model.deepSleep(entry)
-                    } else {
-                        showSleepWarning = true
+                    gate.check(.deepSleep, entry: entry, model: model) {
+                        if PauseFlags.hasSeenDeepSleepWarning {
+                            model.deepSleep(entry)
+                        } else {
+                            showSleepWarning = true
+                        }
                     }
                 } label: {
-                    Image(systemName: "moon.zzz.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.indigo)
+                    if gate.armed == .deepSleep {
+                        forceLabel("moon.zzz.fill")
+                    } else {
+                        Image(systemName: "moon.zzz.fill")
+                            .font(.system(size: 16))
+                            .foregroundStyle(.indigo)
+                    }
                 }
                 .buttonStyle(.plain)
-                .help("Deep Sleep \(entry.name) — quit it and free all its memory (recoverable)")
+                .help(gate.armed == .deepSleep ? forceHelp : "Deep Sleep \(entry.name) — quit it and free all its memory (recoverable)")
                 .popover(isPresented: $showSleepWarning, arrowEdge: .trailing) {
                     DeepSleepWarningView(
                         entry: entry,
@@ -337,14 +364,22 @@ private struct AppRow: View {
                 .help(actionHelp)
             } else {
                 Button {
-                    entry.state == .running ? model.pause(entry) : model.resume(entry)
+                    if entry.state == .running {
+                        gate.check(.pause, entry: entry, model: model) { model.pause(entry) }
+                    } else {
+                        model.resume(entry)
+                    }
                 } label: {
-                    Image(systemName: entry.state == .running ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundStyle(entry.state == .running ? .blue : .green)
+                    if gate.armed == .pause {
+                        forceLabel("pause.circle.fill")
+                    } else {
+                        Image(systemName: entry.state == .running ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(entry.state == .running ? .blue : .green)
+                    }
                 }
                 .buttonStyle(.plain)
-                .help(actionHelp)
+                .help(gate.armed == .pause ? forceHelp : actionHelp)
             }
         }
         .padding(.horizontal, 8)
@@ -353,8 +388,22 @@ private struct AppRow: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(hovering ? Color.primary.opacity(0.06) : rowTint)
         )
-        .onHover { hovering = $0 }
+        .onHover { inside in
+            hovering = inside
+            if !inside { gate.clear() }
+        }
     }
+
+    private func forceLabel(_ systemImage: String) -> some View {
+        Label("Force", systemImage: systemImage)
+            .font(.system(size: 11, weight: .medium))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.orange, in: Capsule())
+            .foregroundStyle(.white)
+    }
+
+    private var forceHelp: String { "\(gate.text ?? "Busy"). Click again to proceed anyway." }
 
     @ViewBuilder
     private var badge: some View {
@@ -384,14 +433,17 @@ private struct AppRow: View {
     /// swapped pages and so barely moves.
     private var memoryLine: some View {
         HStack(spacing: 5) {
-            if entry.state == .sleeping {
+            if let busyText = gate.text {
+                Text(busyText).font(.system(size: 10)).foregroundStyle(.orange)
+                    .lineLimit(1).truncationMode(.tail)
+            } else if entry.state == .sleeping {
                 Text("quit — 0 bytes held").font(.system(size: 10))
             } else {
                 Text(MenuView.fmt(entry.resident)).font(.system(size: 10)).monospacedDigit()
                 Text(MenuView.fmt(entry.footprint))
                     .font(.system(size: 9)).monospacedDigit().foregroundStyle(.tertiary)
             }
-            if entry.reclaimedBytes > 0 {
+            if gate.text == nil, entry.reclaimedBytes > 0 {
                 Text("freed \(MenuView.fmt(entry.reclaimedBytes))")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.green)
@@ -414,5 +466,55 @@ private struct AppRow: View {
         case .paused: return "Resume \(entry.name)"
         case .sleeping: return "Wake \(entry.name) — relaunch and restore its windows"
         }
+    }
+}
+
+/// The busy step before a manual Pause or Deep Sleep, shared by the row and the detail popover.
+@MainActor
+final class BusyGate: ObservableObject {
+    enum Action { case pause, deepSleep }
+
+    /// The button armed as Force, and the findings text shown meanwhile.
+    @Published private(set) var armed: Action?
+    @Published private(set) var text: String?
+    private var checking = false
+    /// Bumped by `clear()`, so a check that finishes after the pointer left or after a reset
+    /// is ignored.
+    private var generation = 0
+    private var reset: Task<Void, Never>?
+
+    /// Runs `proceed` at once if the app is idle or the same button was just armed as Force;
+    /// otherwise shows what keeps the app busy and arms Force for a few seconds. Clicks while a
+    /// check runs are ignored.
+    func check(_ action: Action, entry: AppEntry, model: AppListModel, proceed: @escaping () -> Void) {
+        if armed == action {
+            clear()
+            proceed()
+            return
+        }
+        guard !checking else { return }
+        clear()
+        checking = true
+        let started = generation
+        Task { @MainActor in
+            let findings = await model.busyFindings(for: entry)
+            checking = false
+            guard started == generation else { return }
+            guard !findings.isEmpty else { return proceed() }
+            text = "Busy: " + findings.summary
+            armed = action
+            reset = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(5))
+                if !Task.isCancelled { self.clear() }
+            }
+        }
+    }
+
+    func clear() {
+        generation += 1
+        reset?.cancel()
+        reset = nil
+        armed = nil
+        text = nil
     }
 }

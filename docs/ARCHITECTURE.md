@@ -84,10 +84,23 @@ normal save sheet and stay open; Pause reports `.refused` and leaves them merely
 
 `@MainActor ObservableObject`, refreshed every 3 s while the panel is open.
 
-- **Auto-pause** — `evaluateAutoPause()` runs on a separate 30 s policy timer (10 s tolerance)
-  that runs whether or not the panel is open, and at the start of every refresh. It freezes an
-  app with auto-pause enabled that is not frontmost and has not been frontmost for its
-  configured minutes. It skips the UI-only work (history sampling, `SystemStats`).
+- **Auto-pause** - one one-shot `Timer` per app with auto-pause enabled, due at
+  `lastFrontDate` + its minutes, on the main run loop in common modes so it fires with the
+  panel closed. `lastFrontDate` is set when the app is deactivated (and when it is resumed).
+  Timers are rebuilt by `rescheduleAutoPause()` on start, app launch and termination, wake from
+  sleep (one-shot timers do not advance while the Mac sleeps), and when a per-app setting
+  changes; activation cancels the app's timer, deactivation arms it. Only `.regular` apps that
+  are not frontmost (the pid from the last activation notification, not `isActive`, which can
+  still read true right after deactivation) are armed or frozen. On fire, `BusyEvaluator`
+  checks the system-wide blockers and the app's busy findings off the main thread. If the app
+  has no recent CPU sample, it is only sampled and checked again in 30 s, so CPU is judged over
+  those 30 s. If a blocker or finding remains, the app is checked again in 60 s without
+  touching its idle clock, otherwise it is frozen and recorded in `PausedStore`. If the app was
+  activated, rescheduled or frozen while the check ran, the result is dropped.
+- **Busy checks for the UI** - `busyFindings(for:)` for one row or for all Free Up Memory
+  candidates in one pass. `BusyGate` (in `MenuView.swift`) runs the check for the row buttons
+  and the detail popover's Pause Now: a busy result arms Force for 5 s; clicks during a check
+  and results arriving after the pointer left are ignored. `busySettings` (global, `UserDefaults`) is saved on every change.
 - **Thaw on activation** — when `didActivateApplicationNotification` names a frozen pid (in
   `PausedStore` or stopped), the whole tree is resumed, its record dropped, its idle clock
   reset and the pid removed from `reclaimSession`. This covers every frozen app, whether
@@ -108,6 +121,28 @@ normal save sheet and stay open; Pause reports `.refused` and leaves them merely
 - **Sort order** — suspended entries pin to the top. They hold 0 resident RAM, so sorting purely
   by memory buried them beneath every running app and made them hard to bring back.
 - **History** — rolling 40 samples of *resident* memory per entry, feeding the sparklines.
+
+---
+
+## `BusyDetector.swift`, `BusySettings.swift` - busy conditions
+
+`BusyDetector` evaluates the enabled conditions over a set of process trees: CPU (rusage delta
+in mach ticks, summed over the tree), audio (Core Audio process objects), power assertions
+(`IOPMCopyAssertionsByProcess`, on-behalf-of pid), debugger (`PROC_FLAG_TRACED`), devices (open
+`/dev/cu.*`, `/dev/tty.*`, `/dev/disk*` and `IOHIDLibUserClient` creators), input taps
+(`CGGetEventTapList`: an enabled tap that is not listen-only) and processes (regexes on the full
+command line from `KERN_PROCARGS2`). `findings(forTrees:)` reads the system-wide lists once for
+all trees. It keeps the previous CPU sample per pid (dropped after 120 s); for manual checks a pid
+without one gets a first sample and a single 200 ms wait. Auto-pause passes
+`waitForCPU: false`: a tree with no sample at all gets a nil result (sampled, no verdict), and
+pids new to an already sampled tree are skipped for CPU until the next check. `systemBlockers()` reports camera in use,
+`screensharingd` and `SidecarRelay`, which block every automatic pause.
+
+The detector is stateful and not thread-safe, and the CPU wait would stall the UI, so
+`BusyEvaluator` owns it on one serial dispatch queue and returns results through `async`
+functions. `BusySettings` holds the conditions, CPU threshold and regex list in `UserDefaults`, each
+falling back to its default on its own. Conditions are stored as the disabled set, so one added
+later starts enabled.
 
 ---
 
@@ -139,10 +174,11 @@ All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable acro
 
 | File | Role |
 |---|---|
-| `MenuView.swift` | The panel: ring gauge, system usage graph, and the list in two sections: SUSPENDED and APPS. The list gets an explicit height computed from the row and section counts, capped at the screen height (a `ScrollView` has no intrinsic size, so without an explicit height the window collapses; computing rather than measuring keeps the size stable across refreshes). |
+| `MenuView.swift` | The panel: ring gauge, system usage graph, and the list in two sections: SUSPENDED and APPS. A row's Pause and Deep Sleep buttons check the app for busy findings first; if busy, the memory line shows them and the clicked button turns into an orange Force for 5 s or until the pointer leaves the row (for Deep Sleep this comes before the first-time warning). The list gets an explicit height computed from the row and section counts, capped at the screen height (a `ScrollView` has no intrinsic size, so without an explicit height the window collapses; computing rather than measuring keeps the size stable across refreshes). |
 | `DetailViews.swift` | `SparklineView`, `UsageAreaChart` (plotted against total RAM so normal fluctuation looks normal, not like a mountain range), and the per-app detail popover with auto-pause settings. |
 | `SystemDetailView.swift` | Ring gauge, usage history, App/Wired/Compressed/Free/Swap breakdown, top processes. |
-| `ReclaimView.swift` | Free Up Memory: a reviewable checklist of what will be paused, with running totals, before anything happens. Recording and call apps start unticked. Opt-outs can be remembered. |
+| `ReclaimView.swift` | Free Up Memory: a reviewable checklist of what will be paused, with running totals, before anything happens. Busy apps (checked in one pass on open; the confirm button waits for it) start unticked with the reason as subtitle, and are never remembered as opt-outs. Recording and call apps start unticked. Opt-outs can be remembered. |
+| `BusySettingsView.swift` | Settings > Busy apps, a page inside the Settings popover: one checkbox per condition, CPU threshold, and the editable regex list (invalid entries are marked and not saved). |
 | `DeepSleepWarningView.swift` | First-run warning: explains Deep Sleep actually quits the app, reports that app's restore status, offers to enable window restore. |
 | `PauseApp.swift` | `MenuBarExtra` host plus the `NSApplicationDelegate`. Presents the first-run walkthrough in a real `NSWindow` (an `LSUIElement` app isn't activated by default, so it calls `NSApp.activate` explicitly), and resumes every frozen app on quit so nothing is ever stranded. |
 | `OnboardingView.swift` | Four-page animated walkthrough: welcome, the two tiers, Free Up Memory, and where to find the app + start-at-login. Exists because a menu-bar-only app with no Dock icon is easy to lose immediately after installing. |

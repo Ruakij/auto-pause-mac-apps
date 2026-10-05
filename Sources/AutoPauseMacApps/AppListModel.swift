@@ -36,6 +36,9 @@ final class AppListModel: ObservableObject {
     @Published var notice: String?
     /// Everything suspended by the last Local Model Mode run, so it can be undone exactly.
     @Published var reclaimSession: [pid_t] = []
+    @Published var busySettings = BusySettings.load() {
+        didSet { busySettings.save() }
+    }
 
     /// Rolling per-app resident samples for the sparklines. ~40 samples at 3s ≈ 2 minutes.
     private var history: [pid_t: [UInt64]] = [:]
@@ -48,8 +51,17 @@ final class AppListModel: ObservableObject {
     private var lastFrontDate: [pid_t: Date] = [:]
 
     private var timer: Timer?
-    /// Auto-pause runs on its own timer so it fires with the panel closed.
-    private var policyTimer: Timer?
+    /// One-shot auto-pause timer per app, independent of the panel so it fires with it closed.
+    private var autoPauseTimers: [pid_t: Timer] = [:]
+    private let busy = BusyEvaluator()
+    /// A busy app is checked again after this long, without restarting its idle clock.
+    private let busyRetryInterval: TimeInterval = 60
+    /// An app without a recent CPU sample is sampled and checked again after this long, so
+    /// CPU is judged over this window rather than a moment.
+    private let cpuSampleRetryInterval: TimeInterval = 30
+    /// Frontmost app as last reported by activation notifications; `isActive` of an app that
+    /// just deactivated can still read true.
+    private var frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
     private var observers: [NSObjectProtocol] = []
 
     init() {
@@ -57,7 +69,10 @@ final class AppListModel: ObservableObject {
         for note in [NSWorkspace.didLaunchApplicationNotification,
                      NSWorkspace.didTerminateApplicationNotification] {
             observers.append(center.addObserver(forName: note, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.refresh() }
+                Task { @MainActor in
+                    self?.rescheduleAutoPause()
+                    self?.refresh()
+                }
             })
         }
         observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
@@ -65,17 +80,25 @@ final class AppListModel: ObservableObject {
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             Task { @MainActor in self?.didActivate(pid: app.processIdentifier) }
         })
+        observers.append(center.addObserver(forName: NSWorkspace.didDeactivateApplicationNotification,
+                                             object: nil, queue: .main) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            Task { @MainActor in self?.didDeactivate(pid: app.processIdentifier) }
+        })
+        // One-shot timers do not advance while the Mac sleeps; apps idle overnight are due now.
+        observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification,
+                                             object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.rescheduleAutoPause() }
+        })
+        rescheduleAutoPause()
         refresh()
-        policyTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.evaluateAutoPause() }
-        }
-        policyTimer?.tolerance = 10
     }
 
     /// The activation notification arrives while a frozen app is still stopped, so thawing
     /// here is what lets a Dock click or Cmd-Tab bring it back. Applies to every frozen app,
     /// however it was frozen.
     private func didActivate(pid: pid_t) {
+        frontPid = pid
         if ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid) {
             ProcessControl.resumeTree(root: pid)
             PausedStore.shared.remove(pid: pid)
@@ -86,6 +109,14 @@ final class AppListModel: ObservableObject {
         } else {
             lastFrontDate[pid] = Date()
         }
+        cancelAutoPause(pid)
+    }
+
+    /// The idle clock starts when an app leaves the front, not when it came there.
+    private func didDeactivate(pid: pid_t) {
+        if frontPid == pid { frontPid = nil }
+        lastFrontDate[pid] = Date()
+        scheduleAutoPause(pid)
     }
 
     func startRefreshing() {
@@ -116,7 +147,6 @@ final class AppListModel: ObservableObject {
     }
 
     func refresh() {
-        evaluateAutoPause(refreshAfter: false)
         let apps = listedApps()
 
         PausedStore.shared.pruneStale(currentApps: apps.map { ($0.processIdentifier, $0.launchDate) })
@@ -257,6 +287,8 @@ final class AppListModel: ObservableObject {
             ProcessControl.resumeTree(root: pid)
             PausedStore.shared.remove(pid: pid)
             footprintAtPause[pid] = nil
+            lastFrontDate[pid] = Date()
+            scheduleAutoPause(pid)
         }
         notice = "Restored \(reclaimSession.count) app\(reclaimSession.count == 1 ? "" : "s")."
         reclaimSession = []
@@ -272,36 +304,90 @@ final class AppListModel: ObservableObject {
         AppSettingsStore.shared.update(settings)
     }
 
-    /// Freezes every app with auto-pause enabled that has been in the background for its
-    /// configured minutes. Runs from the policy tick, so it stays cheap: no history sampling,
-    /// no `SystemStats`, memory read only for apps it actually freezes.
-    private func evaluateAutoPause(refreshAfter: Bool = true) {
+    // MARK: - Auto-pause
+
+    /// Rebuilds every auto-pause timer: on start, launch and termination, and when a setting
+    /// changes. Apps without auto-pause, the frontmost one and frozen ones get none.
+    func rescheduleAutoPause() {
         let apps = listedApps()
         let livePids = Set(apps.map(\.processIdentifier))
         lastFrontDate = lastFrontDate.filter { livePids.contains($0.key) }
+        for pid in autoPauseTimers.keys where !livePids.contains(pid) { cancelAutoPause(pid) }
+        for app in apps where app.processIdentifier > 0 {
+            scheduleAutoPause(app.processIdentifier, app: app)
+        }
+    }
 
-        var pausedAny = false
-        for app in apps {
-            let pid = app.processIdentifier
-            guard pid > 0 else { continue }
-            if lastFrontDate[pid] == nil { lastFrontDate[pid] = app.launchDate ?? Date() }
+    private func cancelAutoPause(_ pid: pid_t) {
+        autoPauseTimers.removeValue(forKey: pid)?.invalidate()
+    }
 
-            let settings = AppSettingsStore.shared.settings(for: app.bundleIdentifier)
-            guard settings.autoPauseEnabled, !app.isActive else { continue }
-            guard !ProcessControl.isStopped(pid), !PausedStore.shared.contains(pid: pid) else { continue }
-            guard let since = lastFrontDate[pid],
-                  Date().timeIntervalSince(since) > TimeInterval(settings.autoPauseMinutes * 60)
-            else { continue }
+    /// Arms the timer for `lastFrontDate + minutes`, or for `at` when re-checking a busy app.
+    private func scheduleAutoPause(_ pid: pid_t, app: NSRunningApplication? = nil, at: Date? = nil) {
+        cancelAutoPause(pid)
+        guard let app = app ?? NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+        let settings = AppSettingsStore.shared.settings(for: app.bundleIdentifier)
+        guard settings.autoPauseEnabled, app.activationPolicy == .regular, pid != frontPid,
+              !ProcessControl.isStopped(pid), !PausedStore.shared.contains(pid: pid) else { return }
+        if lastFrontDate[pid] == nil { lastFrontDate[pid] = app.launchDate ?? Date() }
+        let due = at ?? lastFrontDate[pid]!.addingTimeInterval(TimeInterval(settings.autoPauseMinutes * 60))
+        let timer = Timer(fire: max(due, Date()), interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.autoPauseFired(pid) }
+        }
+        timer.tolerance = 5
+        RunLoop.main.add(timer, forMode: .common)
+        autoPauseTimers[pid] = timer
+    }
 
+    /// Freezes the app unless it is busy or something blocks every automatic pause; then it
+    /// is checked again later. The idle clock stays as it is, so the app is frozen on the
+    /// first check that finds it idle.
+    private func autoPauseFired(_ pid: pid_t) {
+        autoPauseTimers[pid] = nil
+        guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated,
+              app.activationPolicy == .regular, pid != frontPid else { return }
+        let since = lastFrontDate[pid]
+        let settings = busySettings
+        Task { @MainActor in
+            let blockers = await busy.systemBlockers()
+            let findings = blockers.isEmpty
+                ? await busy.findings(roots: [pid], settings: settings, waitForCPU: false)[0] : []
+            // The user may have switched to it, paused it or changed its setting meanwhile.
+            guard autoPauseTimers[pid] == nil, lastFrontDate[pid] == since,
+                  !app.isTerminated, app.activationPolicy == .regular, pid != frontPid,
+                  AppSettingsStore.shared.settings(for: app.bundleIdentifier).autoPauseEnabled,
+                  !ProcessControl.isStopped(pid), !PausedStore.shared.contains(pid: pid) else { return }
+            guard let findings else {
+                scheduleAutoPause(pid, app: app, at: Date().addingTimeInterval(cpuSampleRetryInterval))
+                return
+            }
+            if !blockers.isEmpty || !findings.isEmpty {
+                scheduleAutoPause(pid, app: app, at: Date().addingTimeInterval(busyRetryInterval))
+                return
+            }
             let footprint = ProcessControl.treeMemory(root: pid).footprint
-            guard ProcessControl.pauseTree(root: pid) else { continue }
+            guard ProcessControl.pauseTree(root: pid) else { return }
             footprintAtPause[pid] = footprint
             PausedStore.shared.add(PausedRecord(
                 pid: pid, bundleID: app.bundleIdentifier,
                 name: app.localizedName ?? "Unknown", launchDate: app.launchDate))
-            pausedAny = true
+            refresh()
         }
-        if pausedAny && refreshAfter { refresh() }
+    }
+
+    // MARK: - Busy checks
+
+    /// What keeps this app busy right now; empty if nothing does.
+    func busyFindings(for entry: AppEntry) async -> [BusyFinding] {
+        guard let pid = entry.pid else { return [] }
+        return await busy.findings(roots: [pid], settings: busySettings)[0] ?? []
+    }
+
+    /// Busy findings for several apps in one pass, keyed by entry id.
+    func busyFindings(for entries: [AppEntry]) async -> [String: [BusyFinding]] {
+        let live = entries.filter { $0.pid != nil }
+        let results = await busy.findings(roots: live.compactMap(\.pid), settings: busySettings)
+        return Dictionary(uniqueKeysWithValues: zip(live.map(\.id), results.map { $0 ?? [] }))
     }
 
     // MARK: - Actions
@@ -325,6 +411,7 @@ final class AppListModel: ObservableObject {
         PausedStore.shared.remove(pid: pid)
         footprintAtPause[pid] = nil
         lastFrontDate[pid] = Date()
+        scheduleAutoPause(pid)
         refresh()
     }
 
@@ -370,8 +457,12 @@ final class AppListModel: ObservableObject {
             PausedStore.shared.remove(pid: rec.pid)
         }
         for entry in entries where entry.state == .paused {
-            if let pid = entry.pid { ProcessControl.resumeTree(root: pid) }
+            if let pid = entry.pid {
+                ProcessControl.resumeTree(root: pid)
+                lastFrontDate[pid] = Date()
+            }
         }
+        rescheduleAutoPause()
         let sleeping = SleptStore.shared.records
         Task { @MainActor in
             for rec in sleeping { _ = await DeepSleepController.wake(rec) }

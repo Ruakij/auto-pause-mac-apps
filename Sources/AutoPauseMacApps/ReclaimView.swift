@@ -14,6 +14,8 @@ struct ReclaimView: View {
     @State private var selected: Set<String> = []
     @State private var candidates: [AppEntry] = []
     @State private var rememberOptOuts = true
+    /// What keeps each candidate busy, by entry id; nil until the check has finished.
+    @State private var busy: [String: [BusyFinding]]?
 
     /// Apps that are plausibly capturing or presenting right now. These start UNTICKED:
     /// pausing a screen recorder mid-capture destroys the recording, and pausing a call
@@ -69,6 +71,12 @@ struct ReclaimView: View {
             candidates = model.reclaimCandidates
             // Everything ticked except likely recording/calling apps.
             selected = Set(candidates.filter { !isCaptureApp($0) }.map(\.id))
+            Task { @MainActor in
+                let found = await model.busyFindings(for: candidates).filter { !$0.value.isEmpty }
+                // Busy apps start unticked, like capture apps; ticking one is the force.
+                selected.subtract(found.keys)
+                busy = found
+            }
         }
     }
 
@@ -95,7 +103,7 @@ struct ReclaimView: View {
             HStack(spacing: 5) {
                 Image(systemName: "checkmark.shield.fill")
                     .font(.system(size: 9)).foregroundStyle(.green)
-                Text("Untick anything you're using. Recording and call apps start unticked. Nothing is paused until you press the button.")
+                Text("Untick anything you're using. Busy, recording and call apps start unticked. Nothing is paused until you press the button.")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -112,6 +120,7 @@ struct ReclaimView: View {
             .buttonStyle(.plain)
             .font(.caption2)
             .foregroundStyle(.blue)
+            .disabled(busy == nil)
             Spacer()
             Text("\(selected.count) of \(candidates.count) selected")
                 .font(.caption2).foregroundStyle(.secondary)
@@ -138,7 +147,12 @@ struct ReclaimView: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(isOn ? .primary : .secondary)
                         .lineLimit(1)
-                    if isCaptureApp(entry) {
+                    if let findings = busy?[entry.id] {
+                        Label("Busy: \(findings.summary)", systemImage: "hourglass")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                    } else if isCaptureApp(entry) {
                         Label("may be recording or in a call", systemImage: "record.circle")
                             .font(.system(size: 9))
                             .foregroundStyle(.orange)
@@ -156,6 +170,8 @@ struct ReclaimView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // The check's result unticks busy apps; a tick made meanwhile would be lost.
+        .disabled(busy == nil)
     }
 
     private var footer: some View {
@@ -190,9 +206,10 @@ struct ReclaimView: View {
                     .foregroundStyle(freeing > 0 ? .primary : .secondary)
                 Spacer()
                 Button("Cancel", action: onDone)
-                Button("Pause \(chosen.count)") {
+                Button(busy == nil ? "Checking..." : "Pause \(chosen.count)") {
                     if rememberOptOuts {
-                        for entry in candidates where !selected.contains(entry.id) {
+                        // Busy is a passing state, not a reason to never offer the app again.
+                        for entry in candidates where !selected.contains(entry.id) && busy?[entry.id] == nil {
                             model.setExcludedFromReclaim(true, for: entry)
                         }
                     }
@@ -201,7 +218,7 @@ struct ReclaimView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.teal)
-                .disabled(chosen.isEmpty)
+                .disabled(chosen.isEmpty || busy == nil)
             }
         }
         .padding(.horizontal, 13)

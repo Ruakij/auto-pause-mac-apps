@@ -36,6 +36,7 @@ struct AppDetailView: View {
     let entry: AppEntry
     @ObservedObject var model: AppListModel
     @State private var settings: AppSettings
+    @StateObject private var gate = BusyGate()
 
     init(entry: AppEntry, model: AppListModel) {
         self.entry = entry
@@ -84,21 +85,31 @@ struct AppDetailView: View {
             }
 
             HStack {
+                if let busyText = gate.text {
+                    Text(busyText).font(.caption).foregroundStyle(.orange).lineLimit(2)
+                }
                 Spacer()
-                Button(entry.state == .running ? "Pause Now" : "Resume") {
-                    entry.state == .running ? model.pause(entry) : model.resume(entry)
+                Button(gate.armed == .pause ? "Force" : entry.state == .running ? "Pause Now" : "Resume") {
+                    if entry.state == .running {
+                        gate.check(.pause, entry: entry, model: model) { model.pause(entry) }
+                    } else {
+                        model.resume(entry)
+                    }
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(gate.armed == .pause ? .orange : nil)
             }
         }
         .padding(14)
         .frame(width: 280)
+        .onDisappear { gate.clear() }
     }
 
     private func save() {
         guard let id = entry.bundleID, !id.isEmpty else { return }
         settings.bundleID = id
         AppSettingsStore.shared.update(settings)
+        model.rescheduleAutoPause()
     }
 }
 

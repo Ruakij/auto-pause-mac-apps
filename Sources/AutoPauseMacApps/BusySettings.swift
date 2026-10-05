@@ -7,6 +7,7 @@ enum BusyCondition: String, CaseIterable, Codable {
     case powerAssertion
     case debugger
     case devices
+    case inputTap
     case processes
 
     var title: String {
@@ -16,6 +17,7 @@ enum BusyCondition: String, CaseIterable, Codable {
         case .powerAssertion: return "Keeping the Mac awake"
         case .debugger: return "Debugger attached"
         case .devices: return "Serial ports, disks, input devices"
+        case .inputTap: return "Intercepting keyboard or mouse"
         case .processes: return "Running commands (list below)"
         }
     }
@@ -35,15 +37,16 @@ struct BusySettings: Equatable {
         #"^/bin/zsh -c .*/\.claude/shell-snapshots/"#,
     ]
 
-    private static let enabledKey = "PauseBusyEnabledConditions"
+    /// The disabled set, so a condition added later starts enabled.
+    private static let disabledKey = "PauseBusyDisabledConditions"
     private static let cpuThresholdKey = "PauseBusyCPUThresholdPercent"
     private static let patternsKey = "PauseBusyPatterns"
 
     /// Each value falls back to its default on its own, so adding a setting never resets the others.
     static func load(from defaults: UserDefaults = .standard) -> BusySettings {
         var s = BusySettings()
-        if let raw = defaults.stringArray(forKey: enabledKey) {
-            s.enabled = Set(raw.compactMap(BusyCondition.init(rawValue:)))
+        if let raw = defaults.stringArray(forKey: disabledKey) {
+            s.enabled.subtract(raw.compactMap(BusyCondition.init(rawValue:)))
         }
         if defaults.object(forKey: cpuThresholdKey) != nil {
             s.cpuThresholdPercent = defaults.double(forKey: cpuThresholdKey)
@@ -55,7 +58,8 @@ struct BusySettings: Equatable {
     }
 
     func save(to defaults: UserDefaults = .standard) {
-        defaults.set(enabled.map(\.rawValue).sorted(), forKey: Self.enabledKey)
+        let disabled = Set(BusyCondition.allCases).subtracting(enabled)
+        defaults.set(disabled.map(\.rawValue).sorted(), forKey: Self.disabledKey)
         defaults.set(cpuThresholdPercent, forKey: Self.cpuThresholdKey)
         defaults.set(patterns, forKey: Self.patternsKey)
     }
