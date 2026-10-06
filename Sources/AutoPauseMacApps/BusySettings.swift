@@ -75,3 +75,35 @@ struct BusySettings: Equatable {
         }
     }
 }
+
+/// Apps nothing freezes, by bundle ID: not auto-pause, Free Up Memory, a manual Pause or Force.
+enum NeverFreezeList {
+    static let defaults = [
+        "com.apple.finder",
+        "com.apple.systempreferences",
+        "com.apple.ScreenSharing",
+        "com.apple.ActivityMonitor",
+        "com.apple.Passwords",
+        "com.1password.1password",
+        "com.bitwarden.desktop",
+        "org.keepassxc.keepassxc",
+        "com.paloaltonetworks.GlobalProtect.client",
+        "net.tunnelblick.tunnelblick",
+        "com.wireguard.macos",
+        "com.utmapp.UTM",
+        "com.docker.docker",
+        "com.parallels.desktop.console",
+        "com.vmware.fusion",
+    ]
+
+    /// The full list, defaults included, so a removed default stays removed. Absent = defaults.
+    private static let key = "PauseNeverFreezeBundleIDs"
+
+    static func load(from defaults: UserDefaults = .standard) -> [String] {
+        defaults.stringArray(forKey: key) ?? Self.defaults
+    }
+
+    static func save(_ ids: [String], to defaults: UserDefaults = .standard) {
+        defaults.set(ids, forKey: key)
+    }
+}

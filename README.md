@@ -75,6 +75,8 @@ confirm button.**
 - Your **frontmost app** is never listed.
 - **Auto Pause itself is never listed**, and refuses to freeze any process tree containing
   itself — at the signal layer, not just in the selection logic.
+- Apps on the **Never freeze** list (Finder, System Settings, password managers, VPN
+  clients, VM hosts, ...) are never listed.
 - **Busy apps** (playing audio, running `git` or a build, computing, ...) start **unticked**
   with the reason shown, e.g. *"Busy: playing audio"*. Ticking one pauses it anyway.
 - **Recording and call apps** (QuickTime, OBS, ScreenFlow, Loom, Zoom, Teams, Meet, Discord,
@@ -324,13 +326,30 @@ An app counts as busy when anything in its process tree is:
   Claude Code tool calls. Idle language servers do not match, so an editor with nothing running
   still counts as idle.
 
-Busy apps are never auto-paused. Clicking Pause or Deep Sleep on one shows what is still
-running in its row (*"Busy: git fetch, playing audio"*) and turns the button into an orange
-**Force**; a second click within 5 seconds goes ahead. Resume and Wake never ask.
+While the panel is open, every app row and every window row shows its state under the memory
+line, updated every 3 seconds: busy (*"Busy: in use, git fetch"*, in orange; "in use" is the
+frontmost app or the focused window of the frontmost app) or idle (*"Idle 12 min"*, plus
+*"pauses in 3 min"* when auto-pause is on). Nothing is sampled for it while the panel is closed.
 
-Each condition can be switched off in **Settings > Busy apps**, along with the CPU threshold
+Busy apps are never auto-paused. Clicking Pause or Deep Sleep on a row shown busy shows what is
+still running and turns the button into an orange **Force**; a second click within 5 seconds
+goes ahead. A row shown idle acts at once. Right after the panel opens, before a state is
+shown, the click checks first. Resume and Wake never ask.
+
+Each condition can be switched off in **Settings > Busy conditions**, along with the CPU threshold
 and the command list (regular expressions on the full command line; invalid ones are not
 saved). All checks use public APIs and need no permission.
+
+### Never freeze
+
+Some apps break the Mac when frozen. Apps on the **Never freeze** list are never paused: not
+automatically, not by Free Up Memory, not by hand and not per window, and there is no Force.
+Their row shows a lock instead of Pause and no busy or idle state. Deep Sleep (a normal quit)
+stays available. The defaults: Finder, System Settings, Screen Sharing, Activity Monitor,
+Passwords, 1Password, Bitwarden, KeePassXC, GlobalProtect, Tunnelblick, WireGuard, UTM, Docker
+Desktop, Parallels Desktop and VMware Fusion. **Settings > Never freeze** lists them with name
+and icon, removes entries, adds any listed app and restores the defaults. Removing an app from
+the list makes it freezable.
 
 ---
 
@@ -384,12 +403,15 @@ Yes. The release DMG is a universal binary for both. macOS 14 (Sonoma) or later.
 
 Yes. Because it freezes the whole process tree, multi-process apps like Chromium browsers and
 Electron apps (Slack, VS Code, Discord) are handled correctly — that's where most of the memory
-actually lives.
+actually lives. Docker Desktop is on the Never freeze list by default (its VM runs in the app's
+tree); removing it from the list makes it pausable.
 
 ### Which processes will it refuse to touch?
 
 Auto Pause only pauses regular apps you explicitly approve, plus the helper processes those apps
-own. Background services and system daemons are never listed or touched at all. It also refuses
+own. Background services and system daemons are never listed or touched at all. Apps on the
+Never freeze list (Finder, System Settings, password managers, VPN clients, VM hosts by default)
+are never frozen. It also refuses
 to freeze itself or any process tree containing itself — enforced when the signal is sent, so it
 holds regardless of what the UI asks for — and it can only ever signal processes owned by you.
 

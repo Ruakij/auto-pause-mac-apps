@@ -15,7 +15,9 @@ struct BusyFinding: Equatable {
 }
 
 /// Evaluates busy conditions over a set of pids. Stateful (unlike `ProcessControl`): it keeps
-/// the previous CPU sample per pid so a re-check measures CPU since the previous check.
+/// recent CPU samples per pid so a re-check measures CPU since an earlier check. The panel's
+/// live pass (every 3 s) and the auto-pause checks share these samples; each asks for its own
+/// minimum interval, so the frequent live samples do not shrink the auto-pause window.
 /// Not thread-safe; call from one actor.
 final class BusyDetector {
 
@@ -24,7 +26,8 @@ final class BusyDetector {
         var uptimeNanos: UInt64
     }
 
-    private var cpuSamples: [pid_t: CPUSample] = [:]
+    /// Oldest first, none older than `maxSampleAge`.
+    private var cpuSamples: [pid_t: [CPUSample]] = [:]
     private var compiled: (patterns: [String], regexes: [NSRegularExpression]) = ([], [])
 
     /// Older samples average over too long a window to say anything about now. Above the
@@ -34,9 +37,11 @@ final class BusyDetector {
 
     /// One result per tree. System-wide lists (audio objects, power assertions, the IORegistry)
     /// are read once for all trees, and the CPU wait for missing samples happens at most once.
-    /// Without `waitForCPU`, a tree with no recent CPU sample at all is only sampled and its
-    /// result is nil: the caller checks again later, and that check measures over the gap.
-    func findings(forTrees trees: [[pid_t]], settings: BusySettings, waitForCPU: Bool = true) -> [[BusyFinding]?] {
+    /// CPU is measured against the newest earlier sample at least `minCPUWindow` seconds old.
+    /// Without `waitForCPU`, a tree with no such sample for any of its pids is only sampled and
+    /// its result is nil: the caller checks again later, and that check measures over the gap.
+    func findings(forTrees trees: [[pid_t]], settings: BusySettings, waitForCPU: Bool = true,
+                  minCPUWindow: TimeInterval = 0) -> [[BusyFinding]?] {
         let on = settings.enabled
         let pids = trees.flatMap { $0 }
         let pidSet = Set(pids)
@@ -44,21 +49,20 @@ final class BusyDetector {
         if on.contains(.audio) { shared += audioFindings(pidSet) }
         if on.contains(.powerAssertion) { shared += powerAssertionFindings(pidSet) }
         if on.contains(.debugger) {
-            shared += pids.filter { Self.bsdInfo($0).map { $0.pbi_flags & UInt32(PROC_FLAG_TRACED) != 0 } ?? false }
+            shared += pidSet.filter { Self.bsdInfo($0).map { $0.pbi_flags & UInt32(PROC_FLAG_TRACED) != 0 } ?? false }
                 .map { BusyFinding(condition: .debugger, pid: $0, detail: "debugger attached") }
         }
-        if on.contains(.devices) { shared += deviceFindings(pids) + hidFindings(pidSet) }
+        if on.contains(.devices) { shared += deviceFindings(Array(pidSet)) + hidFindings(pidSet) }
         if on.contains(.inputTap) { shared += inputTapFindings(pidSet) }
-        if on.contains(.processes) { shared += processFindings(pids, patterns: settings.patterns) }
+        if on.contains(.processes) { shared += processFindings(Array(pidSet), patterns: settings.patterns) }
 
-        let primed = on.contains(.cpu) ? primeCPU(pids, wait: waitForCPU) : []
+        let usage = on.contains(.cpu) ? measureCPU(pidSet, minWindow: minCPUWindow, wait: waitForCPU) : [:]
         return trees.map { tree in
             let members = Set(tree)
             var result: [BusyFinding] = []
             if on.contains(.cpu) {
-                if !waitForCPU, !members.isEmpty, members.isSubset(of: primed) { return nil }
-                // Unless waited for, a pid sampled just now has no interval to measure yet.
-                let measured = waitForCPU ? tree : tree.filter { !primed.contains($0) }
+                let measured = members.compactMap { pid in usage[pid].map { (pid, $0) } }
+                if !waitForCPU, !members.isEmpty, measured.isEmpty { return nil }
                 if let f = cpuFinding(measured, thresholdPercent: settings.cpuThresholdPercent) { result.append(f) }
             }
             return result + shared.filter { members.contains($0.pid) }
@@ -67,37 +71,44 @@ final class BusyDetector {
 
     // MARK: CPU
 
-    /// Takes a first sample for every pid without a recent one and returns those pids. With
-    /// `wait` (a manual click, no earlier sample) a short second sample still gives an answer.
-    private func primeCPU(_ pids: [pid_t], wait: Bool) -> Set<pid_t> {
+    /// CPU percent per pid that has a baseline sample at least `minWindow` old, and a new
+    /// sample for every pid. With `wait` (a manual click) pids without any sample get one
+    /// first and a short wait, so they still get an answer.
+    private func measureCPU(_ pids: Set<pid_t>, minWindow: TimeInterval, wait: Bool) -> [pid_t: Double] {
         let now = DispatchTime.now().uptimeNanoseconds
-        cpuSamples = cpuSamples.filter { now - $0.value.uptimeNanos < maxSampleAge }
-        var added: Set<pid_t> = []
-        for pid in pids where cpuSamples[pid] == nil {
-            if let s = Self.cpuSample(pid) {
-                cpuSamples[pid] = s
-                added.insert(pid)
-            }
+        cpuSamples = cpuSamples.compactMapValues { list in
+            let kept = list.filter { now - $0.uptimeNanos < maxSampleAge }
+            return kept.isEmpty ? nil : kept
         }
-        if wait, !added.isEmpty { Thread.sleep(forTimeInterval: 0.2) }
-        return added
+        if wait {
+            var added = false
+            for pid in pids where cpuSamples[pid] == nil {
+                if let s = Self.cpuSample(pid) {
+                    cpuSamples[pid] = [s]
+                    added = true
+                }
+            }
+            if added { Thread.sleep(forTimeInterval: 0.2) }
+        }
+        let window = UInt64(max(0, minWindow) * Double(NSEC_PER_SEC))
+        var result: [pid_t: Double] = [:]
+        for pid in pids {
+            guard let cur = Self.cpuSample(pid) else { cpuSamples[pid] = nil; continue }
+            let list = cpuSamples[pid] ?? []
+            if let base = list.last(where: { cur.uptimeNanos > $0.uptimeNanos && cur.uptimeNanos - $0.uptimeNanos >= window }),
+               cur.cpuNanos >= base.cpuNanos {
+                result[pid] = Double(cur.cpuNanos - base.cpuNanos) / Double(cur.uptimeNanos - base.uptimeNanos) * 100
+            }
+            cpuSamples[pid] = list + [cur]
+        }
+        return result
     }
 
     /// One finding for the whole tree, attributed to its busiest pid: the threshold is for the
     /// app, and many helpers each just under it still add up to an app at work.
-    private func cpuFinding(_ pids: [pid_t], thresholdPercent: Double) -> BusyFinding? {
-        var totalPercent = 0.0
-        var busiest: (pid: pid_t, percent: Double)?
-        for pid in pids {
-            guard let cur = Self.cpuSample(pid) else { cpuSamples[pid] = nil; continue }
-            defer { cpuSamples[pid] = cur }
-            guard let prev = cpuSamples[pid],
-                  cur.cpuNanos >= prev.cpuNanos, cur.uptimeNanos > prev.uptimeNanos else { continue }
-            let percent = Double(cur.cpuNanos - prev.cpuNanos) / Double(cur.uptimeNanos - prev.uptimeNanos) * 100
-            totalPercent += percent
-            if percent > busiest?.percent ?? -1 { busiest = (pid, percent) }
-        }
-        guard let top = busiest, totalPercent >= thresholdPercent else { return nil }
+    private func cpuFinding(_ usage: [(pid: pid_t, percent: Double)], thresholdPercent: Double) -> BusyFinding? {
+        let totalPercent = usage.reduce(0) { $0 + $1.percent }
+        guard let top = usage.max(by: { $0.percent < $1.percent }), totalPercent >= thresholdPercent else { return nil }
         let shown = totalPercent >= 10 ? String(format: "%.0f", totalPercent) : String(format: "%.1f", totalPercent)
         return BusyFinding(condition: .cpu, pid: top.pid, detail: "CPU \(shown)%")
     }
@@ -374,11 +385,14 @@ final class BusyDetector {
 }
 
 extension Array where Element == BusyFinding {
-    /// "git fetch, playing audio": each detail once, in finding order.
-    var summary: String {
+    /// Each detail once, in finding order.
+    var details: [String] {
         var seen: Set<String> = []
-        return map(\.detail).filter { seen.insert($0).inserted }.joined(separator: ", ")
+        return map(\.detail).filter { seen.insert($0).inserted }
     }
+
+    /// "git fetch, playing audio".
+    var summary: String { details.joined(separator: ", ") }
 }
 
 /// Owns the `BusyDetector` on one serial queue: the detector is not thread-safe, and a
@@ -387,24 +401,25 @@ final class BusyEvaluator: @unchecked Sendable {
     private let detector = BusyDetector()
     private let queue = DispatchQueue(label: "BusyEvaluator", qos: .utility)
 
-    /// Findings per app tree, in the order of `roots`; nil only without `waitForCPU`, see
-    /// `BusyDetector.findings(forTrees:settings:waitForCPU:)`.
-    func findings(roots: [pid_t], settings: BusySettings, waitForCPU: Bool = true) async -> [[BusyFinding]?] {
+    /// Findings per app tree (each root with its descendants), then per group (exactly those
+    /// pids, e.g. one window), in that order. Nil only without `waitForCPU`, see
+    /// `BusyDetector.findings(forTrees:settings:waitForCPU:minCPUWindow:)`.
+    func findings(roots: [pid_t], groups: [[pid_t]] = [], settings: BusySettings, waitForCPU: Bool = true,
+                  minCPUWindow: TimeInterval = 0) async -> [[BusyFinding]?] {
         await withCheckedContinuation { cont in
             queue.async {
-                let trees = roots.map { ProcessControl.processTree(root: $0) }
-                cont.resume(returning: self.detector.findings(forTrees: trees, settings: settings, waitForCPU: waitForCPU))
+                let trees = roots.map { ProcessControl.processTree(root: $0) } + groups
+                cont.resume(returning: self.detector.findings(forTrees: trees, settings: settings,
+                                                              waitForCPU: waitForCPU, minCPUWindow: minCPUWindow))
             }
         }
     }
 
     /// Findings over exactly these pids, e.g. one window group, as one tree.
-    func findings(pids: [pid_t], settings: BusySettings, waitForCPU: Bool = true) async -> [BusyFinding]? {
-        await withCheckedContinuation { cont in
-            queue.async {
-                cont.resume(returning: self.detector.findings(forTrees: [pids], settings: settings, waitForCPU: waitForCPU)[0])
-            }
-        }
+    func findings(pids: [pid_t], settings: BusySettings, waitForCPU: Bool = true,
+                  minCPUWindow: TimeInterval = 0) async -> [BusyFinding]? {
+        await findings(roots: [], groups: [pids], settings: settings, waitForCPU: waitForCPU,
+                       minCPUWindow: minCPUWindow)[0]
     }
 
     func systemBlockers() async -> [String] {

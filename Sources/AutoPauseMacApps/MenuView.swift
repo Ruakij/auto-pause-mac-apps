@@ -8,7 +8,9 @@ struct MenuView: View {
     @State private var showReclaim = false
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var showSettings = false
-    @State private var showBusySettings = false
+    @State private var settingsPage: SettingsPage?
+
+    private enum SettingsPage { case busyConditions, neverFreeze }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,7 +37,8 @@ struct MenuView: View {
                 }
                 // An explicit height, not maxHeight: a ScrollView has no intrinsic size, so
                 // the MenuBarExtra window would collapse it.
-                .frame(height: listHeight(sections: [suspended.count, running.count])
+                .frame(height: listHeight(sections: [suspended.count, running.count],
+                                          stateLines: running.filter(\.showsState).count)
                        + model.entries.compactMap { $0.pid.flatMap { model.details[$0] }?.height }.reduce(0, +))
             }
             Divider()
@@ -154,13 +157,13 @@ struct MenuView: View {
             }
             .help("Settings")
             .popover(isPresented: $showSettings, arrowEdge: .top) {
-                if showBusySettings {
-                    BusySettingsView(model: model) { showBusySettings = false }
-                } else {
-                    settingsPanel
+                switch settingsPage {
+                case .busyConditions: BusySettingsView(model: model) { settingsPage = nil }
+                case .neverFreeze: NeverFreezeSettingsView(model: model) { settingsPage = nil }
+                case nil: settingsPanel
                 }
             }
-            .onChange(of: showSettings) { _, _ in showBusySettings = false }
+            .onChange(of: showSettings) { _, _ in settingsPage = nil }
 
             Button {
                 NSApp.terminate(nil)
@@ -208,17 +211,8 @@ struct MenuView: View {
 
             Divider()
 
-            Button {
-                showBusySettings = true
-            } label: {
-                HStack {
-                    Label("Busy apps", systemImage: "hourglass").font(.caption)
-                    Spacer()
-                    Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+            pageLink("Busy conditions", systemImage: "hourglass", page: .busyConditions)
+            pageLink("Never freeze", systemImage: "lock", page: .neverFreeze)
 
             Button {
                 showSettings = false
@@ -237,6 +231,20 @@ struct MenuView: View {
         .padding(14)
         .frame(width: 250)
         .onAppear { launchAtLogin = LaunchAtLogin.isEnabled }
+    }
+
+    private func pageLink(_ title: String, systemImage: String, page: SettingsPage) -> some View {
+        Button {
+            settingsPage = page
+        } label: {
+            HStack {
+                Label(title, systemImage: systemImage).font(.caption)
+                Spacer()
+                Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     /// Read on every render: trust can be granted while the app runs.
@@ -269,13 +277,14 @@ struct MenuView: View {
     /// Tall enough for every row, capped at the screen. Computed from row counts with fixed
     /// metrics rather than measured, so the window keeps its size across the periodic refresh
     /// unless the number of rows changes.
-    private func listHeight(sections rowCounts: [Int]) -> CGFloat {
+    private func listHeight(sections rowCounts: [Int], stateLines: Int) -> CGFloat {
         let rowHeight: CGFloat = 39    // two text lines + vertical padding
+        let stateLineHeight: CGFloat = 13
         let headerHeight: CGFloat = 19 // section title + its padding
         let spacing: CGFloat = 2
         let rows = rowCounts.reduce(0, +)
         let headers = rowCounts.filter { $0 > 0 }.count
-        let contentHeight = CGFloat(rows) * rowHeight
+        let contentHeight = CGFloat(rows) * rowHeight + CGFloat(stateLines) * stateLineHeight
             + CGFloat(headers) * headerHeight
             + CGFloat(max(0, rows + headers - 1)) * spacing
             + 12 // VStack padding
@@ -297,8 +306,8 @@ private struct AppRow: View {
     @State private var hovering = false
     @State private var showDetail = false
     @State private var showSleepWarning = false
-    /// After a click found the app busy, the matching button turns into Force and the memory
-    /// line shows the findings until the pointer leaves the row or the time runs out.
+    /// After a click on a busy app, the matching button turns into Force and the state line
+    /// shows the findings until the pointer leaves the row or the time runs out.
     @StateObject private var gate = BusyGate()
 
     var body: some View {
@@ -354,6 +363,7 @@ private struct AppRow: View {
                     badge
                 }
                 memoryLine
+                if entry.showsState || gate.text != nil { stateLine }
             }
 
             if entry.history.count > 1 {
@@ -422,6 +432,12 @@ private struct AppRow: View {
                 .tint(.green)
                 .controlSize(.small)
                 .help(actionHelp)
+            } else if entry.state == .running && entry.neverFreeze {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20)
+                    .help("On the Never freeze list")
             } else {
                 Button {
                     if entry.state == .running {
@@ -489,29 +505,43 @@ private struct AppRow: View {
     /// swapped pages and so barely moves.
     private var memoryLine: some View {
         HStack(spacing: 5) {
-            if let busyText = gate.text {
-                Text(busyText).font(.system(size: 10)).foregroundStyle(.orange)
-                    .lineLimit(1).truncationMode(.tail)
-            } else if entry.state == .sleeping {
+            if entry.state == .sleeping {
                 Text("quit — 0 bytes held").font(.system(size: 10))
             } else {
                 Text(MenuView.fmt(entry.resident)).font(.system(size: 10)).monospacedDigit()
                 Text(MenuView.fmt(entry.footprint))
                     .font(.system(size: 9)).monospacedDigit().foregroundStyle(.tertiary)
             }
-            if gate.text == nil, entry.frozenWindows > 0 {
+            if entry.frozenWindows > 0 {
                 Text(entry.windowCount.map { "\(entry.frozenWindows) of \($0) windows paused" }
                      ?? "\(entry.frozenWindows) window\(entry.frozenWindows == 1 ? "" : "s") paused")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.blue)
             }
-            if gate.text == nil, entry.reclaimedBytes > 0 {
+            if entry.reclaimedBytes > 0 {
                 Text("freed \(MenuView.fmt(entry.reclaimedBytes))")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.green)
             }
         }
         .foregroundStyle(.secondary)
+    }
+
+    /// Busy or idle as of the last live pass, or the Force step's findings.
+    @ViewBuilder
+    private var stateLine: some View {
+        let state = entry.pid.flatMap { model.appStates[$0] }
+        Group {
+            if let text = gate.text {
+                Text(text).foregroundStyle(.orange)
+            } else if let state {
+                Text(state.text()).foregroundStyle(state.busy.isEmpty ? .secondary : Color.orange)
+            } else {
+                Text("Checking...").foregroundStyle(.tertiary)
+            }
+        }
+        .font(.system(size: 9))
+        .lineLimit(1).truncationMode(.tail)
     }
 
     private var rowTint: Color {
@@ -546,31 +576,39 @@ final class BusyGate: ObservableObject {
     private var generation = 0
     private var reset: Task<Void, Never>?
 
-    /// Runs `proceed` at once if the app is idle or the same button was just armed as Force;
-    /// otherwise shows what keeps the app busy and arms Force for a few seconds. Clicks while a
+    /// Follows the state on screen: a row shown idle proceeds at once, one shown busy arms
+    /// Force with that text. Without a shown state (panel just opened, never-freeze app) the
+    /// findings are checked first. The same button just armed as Force proceeds. Clicks while a
     /// check runs are ignored.
     func check(_ action: Action, entry: AppEntry, model: AppListModel, proceed: @escaping () -> Void) {
-        check(action, findings: { await model.busyFindings(for: entry) }, proceed: proceed)
+        check(action, shown: entry.pid.flatMap { model.appStates[$0] },
+              findings: { await model.busyFindings(for: entry) }, proceed: proceed)
     }
 
-    func check(_ action: Action, findings check: @escaping () async -> [BusyFinding], proceed: @escaping () async -> Void) {
+    func check(_ action: Action, shown: LiveState?, findings check: @escaping () async -> [BusyFinding],
+               proceed: @escaping () async -> Void) {
         guard !checking else { return }
         let forced = armed == action
         clear()
+        if !forced, let shown, !shown.busy.isEmpty { return arm(action, text: shown.busyText) }
         checking = true
         let started = generation
         Task { @MainActor in
             defer { checking = false }
-            if forced { return await proceed() }
+            if forced || shown != nil { return await proceed() }
             let findings = await check()
             guard started == generation else { return }
             guard !findings.isEmpty else { return await proceed() }
-            text = "Busy: " + findings.summary
-            armed = action
-            reset = Task { @MainActor in
-                try? await Task.sleep(for: .seconds(5))
-                if !Task.isCancelled { self.clear() }
-            }
+            arm(action, text: "Busy: " + findings.summary)
+        }
+    }
+
+    private func arm(_ action: Action, text: String) {
+        self.text = text
+        armed = action
+        reset = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(5))
+            if !Task.isCancelled { self.clear() }
         }
     }
 
@@ -583,9 +621,14 @@ final class BusyGate: ObservableObject {
     }
 }
 
+extension AppEntry {
+    /// Rows that can be paused show busy or idle under the memory line.
+    var showsState: Bool { state == .running && !neverFreeze }
+}
+
 extension AppDetail {
     static let processLineHeight: CGFloat = 15
-    static let windowHeaderHeight: CGFloat = 24
+    static let windowHeaderHeight: CGFloat = 30
 
     /// Height of the expanded part of a row, from fixed line metrics like `listHeight`.
     var height: CGFloat {
@@ -669,12 +712,9 @@ private struct WindowSection: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "macwindow").font(.system(size: 9)).foregroundStyle(.secondary)
-            if let text = gate.text {
-                Text(text).font(.system(size: 9)).foregroundStyle(.orange).lineLimit(1)
-            } else if gate.checking {
-                Text("Checking...").font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
-            } else {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(window.title).font(.system(size: 10, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                stateLine
             }
             Spacer(minLength: 4)
             totals(resident: window.resident, cpu: window.cpuPercent)
@@ -682,6 +722,29 @@ private struct WindowSection: View {
         }
         .frame(height: AppDetail.windowHeaderHeight)
         .onHover { if !$0 { gate.clear() } }
+    }
+
+    private var state: LiveState? {
+        entry.pid.flatMap { model.windowStates[WindowKey(pid: $0, window: window.id)] }
+    }
+
+    @ViewBuilder
+    private var stateLine: some View {
+        Group {
+            if let text = gate.text {
+                Text(text).foregroundStyle(.orange)
+            } else if gate.checking {
+                Text("Checking...").foregroundStyle(.secondary)
+            } else if window.frozen || entry.neverFreeze {
+                EmptyView()
+            } else if let state {
+                Text(state.text()).foregroundStyle(state.busy.isEmpty ? .secondary : Color.orange)
+            } else {
+                Text("Checking...").foregroundStyle(.tertiary)
+            }
+        }
+        .font(.system(size: 9))
+        .lineLimit(1).truncationMode(.tail)
     }
 
     @ViewBuilder
@@ -692,11 +755,11 @@ private struct WindowSection: View {
             }
             .buttonStyle(.plain)
             .help("Resume this window")
-        } else {
+        } else if !entry.neverFreeze {
             let trusted = Accessibility.isTrusted
             let pids = window.processes.map(\.pid)
             Button {
-                gate.check(.pause, findings: { await model.busyFindings(pids: pids) }) {
+                gate.check(.pause, shown: state, findings: { await model.busyFindings(pids: pids) }) {
                     await model.pauseWindow(entry, window: window.id)
                 }
             } label: {

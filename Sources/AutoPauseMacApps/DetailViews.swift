@@ -76,8 +76,10 @@ struct AppDetailView: View {
             Toggle("Auto-pause when idle", isOn: $settings.autoPauseEnabled)
                 .toggleStyle(.switch)
                 .onChange(of: settings.autoPauseEnabled) { _, _ in save() }
+                .disabled(entry.neverFreeze)
+                .help(entry.neverFreeze ? "On the Never freeze list" : "")
 
-            if settings.autoPauseEnabled {
+            if settings.autoPauseEnabled && !entry.neverFreeze {
                 Stepper("After \(settings.autoPauseMinutes) min in background",
                         value: $settings.autoPauseMinutes, in: 1...180)
                     .font(.caption)
@@ -89,15 +91,20 @@ struct AppDetailView: View {
                     Text(busyText).font(.caption).foregroundStyle(.orange).lineLimit(2)
                 }
                 Spacer()
-                Button(gate.armed == .pause ? "Force" : entry.state == .running ? "Pause Now" : "Resume") {
-                    if entry.state == .running {
-                        gate.check(.pause, entry: entry, model: model) { model.pause(entry) }
-                    } else {
-                        model.resume(entry)
+                if entry.state == .running && entry.neverFreeze {
+                    Label("On the Never freeze list", systemImage: "lock.fill")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Button(gate.armed == .pause ? "Force" : entry.state == .running ? "Pause Now" : "Resume") {
+                        if entry.state == .running {
+                            gate.check(.pause, entry: entry, model: model) { model.pause(entry) }
+                        } else {
+                            model.resume(entry)
+                        }
                     }
+                    .buttonStyle(.borderedProminent)
+                    .tint(gate.armed == .pause ? .orange : nil)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(gate.armed == .pause ? .orange : nil)
             }
         }
         .padding(14)

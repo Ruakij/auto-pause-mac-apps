@@ -96,14 +96,29 @@ normal save sheet and stay open; Pause reports `.refused` and leaves them merely
   are not frontmost (the pid from the last activation notification, not `isActive`, which can
   still read true right after deactivation) are armed or frozen. On fire, `BusyEvaluator`
   checks the system-wide blockers and the app's busy findings off the main thread. If the app
-  has no recent CPU sample, it is only sampled and checked again in 30 s, so CPU is judged over
-  those 30 s. If a blocker or finding remains, the app is checked again in 60 s without
+  has no CPU sample at least 20 s old, it is only sampled and checked again in 30 s, so CPU is
+  judged over at least 20 s even while the panel's live pass samples every 3 s. If a blocker or finding remains, the app is checked again in 60 s without
   touching its idle clock, otherwise it is frozen and recorded in `PausedStore`. If the app was
   activated, rescheduled or frozen while the check ran, the result is dropped.
+- **Live state** - while the panel is open, every refresh starts one `BusyEvaluator` pass (none
+  while one still runs) over every listed app and every shown window group of an expanded row,
+  except never-freeze apps, frozen apps and frozen windows. CPU is measured since the previous
+  pass, without the 200 ms wait, so a tree with no recent sample gets no state on the first pass.
+  The result is `appStates` / `windowStates` (`LiveState`): busy reasons ("in use" for the
+  frontmost app and for the focused window of the frontmost app, then the findings), the idle
+  start (`lastFrontDate` or launch; `windowIdleSince`, else the app's) and the auto-pause timer's
+  fire date. Closing the panel clears both and drops a pass still running.
 - **Busy checks for the UI** - `busyFindings(for:)` for one row or for all Free Up Memory
-  candidates in one pass. `BusyGate` (in `MenuView.swift`) runs the check for the row buttons
-  and the detail popover's Pause Now: a busy result arms Force for 5 s; clicks during a check
-  and results arriving after the pointer left are ignored. `busySettings` (global, `UserDefaults`) is saved on every change.
+  candidates in one pass. `BusyGate` (in `MenuView.swift`) handles the row buttons and the
+  detail popover's Pause Now by the state on screen: shown busy arms Force for 5 s with that
+  text, shown idle acts at once, no state yet runs the check first. Clicks during a check and
+  results arriving after the pointer left are ignored. `busySettings` (global, `UserDefaults`) is saved on every change.
+- **Never freeze** - `neverFreeze` (bundle IDs, `NeverFreezeList` in `BusySettings.swift`,
+  `UserDefaults` key `PauseNeverFreezeBundleIDs`; absent = defaults, otherwise the full list so a
+  removed default stays removed). Every freeze goes through `freeze(root:bundleID:)`: manual
+  Pause, auto-pause, Free Up Memory, a refused Deep Sleep (such an app is left running) and
+  window groups. It refuses listed apps; there is no Force. Listed apps get no auto-pause or
+  window timers and are not Free Up Memory candidates. Deep Sleep stays available.
 - **Thaw on activation** — when `didActivateApplicationNotification` names a frozen pid (in
   `PausedStore` or stopped), the whole tree is resumed, its record dropped, its idle clock
   reset and the pid removed from `reclaimSession`. This covers every frozen app, whether
@@ -162,9 +177,10 @@ normal save sheet and stay open; Pause reports `.refused` and leaves them merely
   has no window timers: they are cancelled when it is paused and re-armed when it resumes.
 - **Three states** per entry: `.running`, `.paused` (SIGSTOP), `.sleeping` (quit, resumable).
 - **Apps only.** Entries come solely from `NSWorkspace.runningApplications` filtered to
-  `.regular`, so daemons never enter the list.
+  `.regular`, so daemons never enter the list. Finder is listed (on the Never freeze list by
+  default).
 - **`reclaimCandidates`** — apps Free Up Memory may *offer*. Excludes this app, the frontmost
-  app, anything whose tree contains us, and anything the user opted out of.
+  app, never-freeze apps, anything whose tree contains us, and anything the user opted out of.
 - **`reclaim(selected:)`** — pauses exactly the apps the user ticked. No target-chasing and no
   extras; if `pauseTree` refuses one, it is reported rather than silently skipped. Records the
   pid set as a `reclaimSession`.
@@ -184,10 +200,13 @@ in mach ticks, summed over the tree), audio (Core Audio process objects), power 
 `/dev/cu.*`, `/dev/tty.*`, `/dev/disk*` and `IOHIDLibUserClient` creators), input taps
 (`CGGetEventTapList`: an enabled tap that is not listen-only) and processes (regexes on the full
 command line from `KERN_PROCARGS2`). `findings(forTrees:)` reads the system-wide lists once for
-all trees. It keeps the previous CPU sample per pid (dropped after 120 s); for manual checks a pid
-without one gets a first sample and a single 200 ms wait. Auto-pause passes
-`waitForCPU: false`: a tree with no sample at all gets a nil result (sampled, no verdict), and
-pids new to an already sampled tree are skipped for CPU until the next check. `systemBlockers()` reports camera in use,
+all trees. It keeps every CPU sample per pid for 120 s, and each call adds one; a call measures
+against the newest earlier sample at least `minCPUWindow` old, so the panel's 3 s live pass
+(window 0) and auto-pause (window 20 s) share samples without shortening the auto-pause window.
+For manual checks a pid without any sample gets a first one and a single 200 ms wait. Auto-pause
+and the live pass pass `waitForCPU: false`: a tree with no usable baseline for any pid gets a
+nil result (sampled, no verdict), and pids without one in an otherwise measured tree are
+skipped for CPU until the next check. `systemBlockers()` reports camera in use,
 `screensharingd` and `SidecarRelay`, which block every automatic pause.
 
 The detector is stateful and not thread-safe, and the CPU wait would stall the UI, so
@@ -227,11 +246,12 @@ All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable acro
 | File | Role |
 |---|---|
 | `AppProcesses.swift`, `WindowGroups.swift`, `WindowFocusObserver.swift` | Process tree with role labels; VS Code window mapping (`code --status`, env/fd fallback) and AX title matching; Accessibility trust, prompt, settings link and the focus observer. |
-| `MenuView.swift` | The panel: ring gauge, system usage graph, and the list in two sections: SUSPENDED and APPS. A row's Pause and Deep Sleep buttons check the app for busy findings first; if busy, the memory line shows them and the clicked button turns into an orange Force for 5 s or until the pointer leaves the row (for Deep Sleep this comes before the first-time warning). The list gets an explicit height computed from the row and section counts, capped at the screen height (a `ScrollView` has no intrinsic size, so without an explicit height the window collapses; computing rather than measuring keeps the size stable across refreshes; expanded rows add their line count times a fixed line height). Each row has a chevron that expands it into its processes, or into window sections with Pause/Resume (through their own `BusyGate` over the window's pids; disabled with a tooltip without Accessibility) and a Shared section. Settings shows the Accessibility state with a button to System Settings. |
+| `MenuView.swift` | The panel: ring gauge, system usage graph, and the list in two sections: SUSPENDED and APPS. Running rows have a state line under the memory line: "Busy: in use, git fetch" in orange, or "Idle 12 min, pauses in 3 min", or "Checking..." before the first pass. Pause and Deep Sleep follow it through `BusyGate`; when busy, the state line shows the findings and the clicked button turns into an orange Force for 5 s or until the pointer leaves the row (for Deep Sleep this comes before the first-time warning). Never-freeze apps show a lock instead of Pause (tooltip "On the Never freeze list"), no state line and no window Pause. The list gets an explicit height computed from the row and section counts, capped at the screen height (a `ScrollView` has no intrinsic size, so without an explicit height the window collapses; computing rather than measuring keeps the size stable across refreshes; state lines and expanded rows add their line count times a fixed line height). Each row has a chevron that expands it into its processes, or into window sections (title and state line) with Pause/Resume (through their own `BusyGate` over the window's pids; disabled with a tooltip without Accessibility) and a Shared section. Settings shows the Accessibility state with a button to System Settings. |
 | `DetailViews.swift` | `SparklineView`, `UsageAreaChart` (plotted against total RAM so normal fluctuation looks normal, not like a mountain range), and the per-app detail popover with auto-pause settings. |
 | `SystemDetailView.swift` | Ring gauge, usage history, App/Wired/Compressed/Free/Swap breakdown, top processes. |
-| `ReclaimView.swift` | Free Up Memory: a reviewable checklist of what will be paused, with running totals, before anything happens. Busy apps (checked in one pass on open; the confirm button waits for it) start unticked with the reason as subtitle, and are never remembered as opt-outs. Recording and call apps start unticked. Opt-outs can be remembered. |
-| `BusySettingsView.swift` | Settings > Busy apps, a page inside the Settings popover: one checkbox per condition, CPU threshold, and the editable regex list (invalid entries are marked and not saved). |
+| `ReclaimView.swift` | Free Up Memory: a reviewable checklist of what will be paused, with running totals, before anything happens. Never-freeze apps are not offered. Busy apps (checked in one pass on open; the confirm button waits for it) start unticked with the reason as subtitle, and are never remembered as opt-outs. Recording and call apps start unticked. Opt-outs can be remembered. |
+| `BusySettingsView.swift` | Settings > Busy conditions, a page inside the Settings popover: one checkbox per condition, CPU threshold, and the editable regex list (invalid entries are marked and not saved). |
+| `NeverFreezeSettingsView.swift` | Settings > Never freeze: the list with app name and icon where the app is installed (`urlForApplication(withBundleIdentifier:)`), else the bundle ID; remove buttons, "Add running app..." (listed apps not on the list) and "Restore defaults". |
 | `DeepSleepWarningView.swift` | First-run warning: explains Deep Sleep actually quits the app, reports that app's restore status, offers to enable window restore. |
 | `PauseApp.swift` | `MenuBarExtra` host plus the `NSApplicationDelegate`. Presents the first-run walkthrough in a real `NSWindow` (an `LSUIElement` app isn't activated by default, so it calls `NSApp.activate` explicitly), and resumes every frozen app and window on quit so nothing is ever stranded. Asks for Accessibility at launch when not trusted (the system shows its prompt at most once). |
 | `OnboardingView.swift` | Four-page animated walkthrough: welcome, the two tiers, Free Up Memory, and where to find the app + start-at-login. Exists because a menu-bar-only app with no Dock icon is easy to lose immediately after installing. |

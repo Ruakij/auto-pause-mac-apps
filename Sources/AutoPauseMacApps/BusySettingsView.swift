@@ -21,7 +21,7 @@ struct BusySettingsView: View {
                     Image(systemName: "chevron.left")
                 }
                 .buttonStyle(.plain)
-                Text("Busy apps").font(.system(size: 13, weight: .semibold))
+                Text("Busy conditions").font(.system(size: 13, weight: .semibold))
             }
             Text("A busy app is not auto-paused, and pausing or deep-sleeping it by hand needs a second click.")
                 .font(.system(size: 10)).foregroundStyle(.secondary)

@@ -23,6 +23,8 @@ struct AppEntry: Identifiable, Equatable {
     /// Window groups frozen on their own, and the app's window count when a mapping is known.
     var frozenWindows: Int = 0
     var windowCount: Int? = nil
+    /// On the Never freeze list: no Pause, no window Pause, no state line.
+    var neverFreeze = false
 
     var canDeepSleep: Bool { state != .sleeping }
 }
@@ -66,6 +68,29 @@ struct WindowKey: Hashable {
     let window: Int
 }
 
+/// What an app or window row shows under its memory line while the panel is open.
+struct LiveState: Equatable {
+    /// Why it counts as busy ("in use", then the findings); empty when idle.
+    var busy: [String]
+    var idleSince: Date?
+    /// When its auto-pause timer fires; nil without auto-pause.
+    var pausesAt: Date?
+
+    var busyText: String { "Busy: " + busy.joined(separator: ", ") }
+
+    func text(now: Date = Date()) -> String {
+        if !busy.isEmpty { return busyText }
+        var text = "Idle"
+        if let idleSince { text += " " + Self.minutes(Int(now.timeIntervalSince(idleSince) / 60)) }
+        if let pausesAt { text += ", pauses in " + Self.minutes(Int((pausesAt.timeIntervalSince(now) / 60).rounded(.up))) }
+        return text
+    }
+
+    private static func minutes(_ m: Int) -> String {
+        m < 1 ? "<1 min" : m < 60 ? "\(m) min" : "\(m / 60) h \(m % 60) min"
+    }
+}
+
 @MainActor
 final class AppListModel: ObservableObject {
     @Published var entries: [AppEntry] = []
@@ -81,6 +106,18 @@ final class AppListModel: ObservableObject {
     @Published var busySettings = BusySettings.load() {
         didSet { busySettings.save() }
     }
+    /// Bundle IDs that are never frozen, by anything; see `freeze(root:bundleID:)`.
+    @Published var neverFreeze = NeverFreezeList.load() {
+        didSet {
+            NeverFreezeList.save(neverFreeze)
+            rescheduleAutoPause()
+            refresh()
+        }
+    }
+    /// Live state per app and per window group, computed while the panel is open; absent
+    /// until a pass could measure it.
+    @Published private(set) var appStates: [pid_t: LiveState] = [:]
+    @Published private(set) var windowStates: [WindowKey: LiveState] = [:]
     /// App rows expanded into their processes; only these are sampled per process.
     @Published private(set) var expanded: Set<pid_t> = []
     @Published private(set) var details: [pid_t: AppDetail] = [:]
@@ -134,6 +171,13 @@ final class AppListModel: ObservableObject {
     /// An app without a recent CPU sample is sampled and checked again after this long, so
     /// CPU is judged over this window rather than a moment.
     private let cpuSampleRetryInterval: TimeInterval = 30
+    /// Shortest CPU interval an auto-pause check judges by. The panel's live pass samples
+    /// every 3 s; without this floor an auto-pause check would measure over those 3 s only.
+    /// Below `cpuSampleRetryInterval`, so the re-check after a first sample always qualifies.
+    private let autoPauseCPUWindow: TimeInterval = 20
+    private var livePass: Task<Void, Never>?
+    /// Bumped when the panel opens or closes, so a pass of an earlier opening is dropped.
+    private var livePassGeneration = 0
     /// Frontmost app as last reported by activation notifications; `isActive` of an app that
     /// just deactivated can still read true.
     private var frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -216,16 +260,20 @@ final class AppListModel: ObservableObject {
     }
 
     func startRefreshing() {
-        refresh()
         timer?.invalidate()
+        livePassGeneration += 1
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
+        refresh()
     }
 
     func stopRefreshing() {
         timer?.invalidate()
         timer = nil
+        livePassGeneration += 1
+        appStates = [:]
+        windowStates = [:]
     }
 
     func runningApp(for entry: AppEntry) -> NSRunningApplication? {
@@ -236,9 +284,7 @@ final class AppListModel: ObservableObject {
     private func listedApps() -> [NSRunningApplication] {
         let ownPid = ProcessInfo.processInfo.processIdentifier
         return NSWorkspace.shared.runningApplications.filter {
-            $0.activationPolicy == .regular
-                && $0.processIdentifier != ownPid
-                && $0.bundleIdentifier != "com.apple.finder"
+            $0.activationPolicy == .regular && $0.processIdentifier != ownPid
         }
     }
 
@@ -288,7 +334,8 @@ final class AppListModel: ObservableObject {
                 launchDate: app.launchDate,
                 history: history[pid] ?? [],
                 frozenWindows: Set(PausedStore.shared.windowRecords(owner: pid).compactMap(\.windowId)).count,
-                windowCount: mappings[pid]?.mapping?.groups.count
+                windowCount: mappings[pid]?.mapping?.groups.count,
+                neverFreeze: isNeverFreeze(app.bundleIdentifier)
             ))
         }
 
@@ -337,6 +384,7 @@ final class AppListModel: ObservableObject {
         syncFocusObservers()
         syncEventMonitor()
         syncExitWatchers()
+        startLivePass(apps)
 
         let stats = SystemStats.current()
         systemStats = stats
@@ -355,7 +403,7 @@ final class AppListModel: ObservableObject {
     var reclaimCandidates: [AppEntry] {
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
         return entries.filter { entry in
-            guard entry.state == .running, let pid = entry.pid else { return false }
+            guard entry.state == .running, !entry.neverFreeze, let pid = entry.pid else { return false }
             guard pid != frontmost else { return false }
             guard !ProcessControl.treeContainsSelf(root: pid) else { return false }
             return !AppSettingsStore.shared.settings(for: entry.bundleID).excludedFromReclaim
@@ -372,7 +420,7 @@ final class AppListModel: ObservableObject {
         for entry in selected {
             guard let pid = entry.pid else { continue }
             footprintAtPause[pid] = entry.footprint
-            guard ProcessControl.pauseTree(root: pid) else {
+            guard freeze(root: pid, bundleID: entry.bundleID) else {
                 skipped.append(entry.name)   // refused, e.g. it would have frozen us
                 continue
             }
@@ -453,7 +501,7 @@ final class AppListModel: ObservableObject {
         cancelWindowTimers(pid)
         let settings = AppSettingsStore.shared.settings(for: app.bundleIdentifier)
         guard settings.autoPauseEnabled, app.activationPolicy == .regular, pid != frontPid,
-              !ProcessControl.isStopped(pid), !PausedStore.shared.contains(pid: pid) else { return }
+              !isNeverFreeze(app.bundleIdentifier), !ProcessControl.isStopped(pid), !PausedStore.shared.contains(pid: pid) else { return }
         if lastFrontDate[pid] == nil { lastFrontDate[pid] = app.launchDate ?? Date() }
         let due = at ?? lastFrontDate[pid]!.addingTimeInterval(TimeInterval(settings.autoPauseMinutes * 60))
         let timer = Timer(fire: max(due, Date()), interval: 0, repeats: false) { [weak self] _ in
@@ -476,7 +524,8 @@ final class AppListModel: ObservableObject {
         Task { @MainActor in
             let blockers = await busy.systemBlockers()
             let findings = blockers.isEmpty
-                ? await busy.findings(roots: [pid], settings: settings, waitForCPU: false)[0] : []
+                ? await busy.findings(roots: [pid], settings: settings, waitForCPU: false,
+                                      minCPUWindow: autoPauseCPUWindow)[0] : []
             // The user may have switched to it, paused it or changed its setting meanwhile.
             guard autoPauseTimers[pid] == nil, lastFrontDate[pid] == since,
                   !app.isTerminated, app.activationPolicy == .regular, pid != frontPid,
@@ -492,7 +541,7 @@ final class AppListModel: ObservableObject {
                 return
             }
             let footprint = ProcessControl.treeMemory(root: pid).footprint
-            guard ProcessControl.pauseTree(root: pid) else { return }
+            guard freeze(root: pid, bundleID: app.bundleIdentifier) else { return }
             footprintAtPause[pid] = footprint
             PausedStore.shared.add(PausedRecord(
                 pid: pid, bundleID: app.bundleIdentifier,
@@ -522,12 +571,87 @@ final class AppListModel: ObservableObject {
         return Dictionary(uniqueKeysWithValues: zip(live.map(\.id), results.map { $0 ?? [] }))
     }
 
+    // MARK: - Live state
+
+    /// One busy pass over every listed app and every shown window group, off the main thread,
+    /// on each refresh while the panel is open. CPU is measured since the previous pass, so
+    /// the first pass after a while yields no state for most rows; the next one, 3 s later,
+    /// does. Never-freeze apps, frozen apps and frozen windows get no state.
+    private func startLivePass(_ apps: [NSRunningApplication]) {
+        guard timer != nil, livePass == nil else { return }
+        let roots = apps.filter { !isNeverFreeze($0.bundleIdentifier) && !isFrozenWhole($0.processIdentifier) }
+            .map(\.processIdentifier)
+        let rootSet = Set(roots)
+        var windows: [(key: WindowKey, pids: [pid_t])] = []
+        for (pid, detail) in details where rootSet.contains(pid) {
+            for w in detail.windows ?? [] where !w.frozen {
+                windows.append((WindowKey(pid: pid, window: w.id), w.processes.map(\.pid)))
+            }
+        }
+        let generation = livePassGeneration
+        let settings = busySettings
+        livePass = Task { @MainActor in
+            let results = await busy.findings(roots: roots, groups: windows.map(\.pids), settings: settings,
+                                              waitForCPU: false)
+            livePass = nil
+            guard generation == livePassGeneration else { return }
+            var newApps: [pid_t: LiveState] = [:]
+            var appIdle: [pid_t: Date] = [:]
+            for (pid, found) in zip(roots, results) {
+                let inUse = pid == frontPid
+                guard found != nil || inUse else { continue }
+                let idle = lastFrontDate[pid] ?? NSRunningApplication(processIdentifier: pid)?.launchDate
+                appIdle[pid] = idle
+                newApps[pid] = LiveState(busy: (inUse ? ["in use"] : []) + (found ?? []).details,
+                                         idleSince: idle,
+                                         pausesAt: autoPauseTimers[pid].flatMap { $0.isValid ? $0.fireDate : nil })
+            }
+            let focused = frontPid.flatMap { pid in rootSet.contains(pid) ? focusedWindowId(pid) : nil }
+            var newWindows: [WindowKey: LiveState] = [:]
+            for (window, found) in zip(windows, results.dropFirst(roots.count)) {
+                let key = window.key
+                let inUse = key.pid == frontPid && key.window == focused
+                guard found != nil || inUse else { continue }
+                newWindows[key] = LiveState(
+                    busy: (inUse ? ["in use"] : []) + (found ?? []).details,
+                    idleSince: windowIdleSince[key] ?? (key.pid == frontPid ? nil : appIdle[key.pid]),
+                    pausesAt: windowTimers[key].flatMap { $0.isValid ? $0.fireDate : nil })
+            }
+            appStates = newApps
+            windowStates = newWindows
+        }
+    }
+
+    /// The focused window of the frontmost app: tracked by the focus observer when there is
+    /// one, else read once through Accessibility.
+    private func focusedWindowId(_ pid: pid_t) -> Int? {
+        if let id = focusedWindow[pid] { return id }
+        guard Accessibility.isTrusted, !isFrozenWhole(pid), let groups = mappings[pid]?.mapping?.groups,
+              let title = Accessibility.focusedWindowTitle(pid: pid) else { return nil }
+        return WindowGroups.match(axTitle: title, in: groups)?.id
+    }
+
+    // MARK: - Never freeze
+
+    func isNeverFreeze(_ bundleID: String?) -> Bool {
+        bundleID.map(neverFreeze.contains) ?? false
+    }
+
+    /// The one place anything is frozen: a manual Pause, auto-pause, Free Up Memory, a refused
+    /// Deep Sleep and window groups (`root` is then a window root of the app). Apps on the
+    /// Never freeze list are refused here, with no Force. `pauseTree` keeps its own guard
+    /// against freezing this process.
+    private func freeze(root: pid_t, bundleID: String?) -> Bool {
+        guard !isNeverFreeze(bundleID) else { return false }
+        return ProcessControl.pauseTree(root: root)
+    }
+
     // MARK: - Actions
 
     func pause(_ entry: AppEntry) {
         guard let pid = entry.pid else { return }
         footprintAtPause[pid] = entry.footprint
-        guard ProcessControl.pauseTree(root: pid) else { return }
+        guard freeze(root: pid, bundleID: entry.bundleID) else { return }
         PausedStore.shared.add(PausedRecord(
             pid: pid, bundleID: entry.bundleID, name: entry.name, launchDate: entry.launchDate))
         cancelWindowTimers(pid)
@@ -563,10 +687,14 @@ final class AppListModel: ObservableObject {
                 PausedStore.shared.remove(pid: pid)
                 footprintAtPause[pid] = nil
             case .refused:
-                // Almost always an unsaved-work save sheet. Leave it frozen instead.
+                // Almost always an unsaved-work save sheet. Leave it frozen instead, unless
+                // it must never be frozen.
+                guard freeze(root: pid, bundleID: entry.bundleID) else {
+                    notice = "\(entry.name) has unsaved work, so it was left running instead of quit."
+                    break
+                }
                 notice = "\(entry.name) has unsaved work, so it was left frozen instead of quit."
                 footprintAtPause[pid] = footprint
-                ProcessControl.pauseTree(root: pid)
                 PausedStore.shared.add(PausedRecord(
                     pid: pid, bundleID: entry.bundleID, name: entry.name, launchDate: entry.launchDate))
                 cancelWindowTimers(pid)
@@ -764,7 +892,7 @@ final class AppListModel: ObservableObject {
         for role in ["renderer", "extension host", "file watcher"] {
             guard let root = group.anchors[role], !shared.contains(root), children.contains(root),
                   let start = ProcessControl.startTime(of: root),
-                  ProcessControl.pauseTree(root: root) else { continue }
+                  freeze(root: root, bundleID: app.bundleIdentifier) else { continue }
             PausedStore.shared.add(PausedRecord(
                 pid: root, bundleID: app.bundleIdentifier, name: app.localizedName ?? "Unknown",
                 launchDate: start, ownerPid: appPid, windowId: group.id, windowTitle: title ?? group.title))
@@ -940,6 +1068,7 @@ final class AppListModel: ObservableObject {
     /// whole app.
     private func usesWindowAutoPause(_ app: NSRunningApplication) -> Bool {
         AppSettingsStore.shared.settings(for: app.bundleIdentifier).autoPauseEnabled
+            && !isNeverFreeze(app.bundleIdentifier)
             && WindowGroups.isSupported(app) && Accessibility.isTrusted
     }
 
@@ -1004,7 +1133,8 @@ final class AppListModel: ObservableObject {
             }
             let blockers = await busy.systemBlockers()
             let findings = blockers.isEmpty
-                ? await busy.findings(pids: Array(target.group.pids), settings: settings, waitForCPU: false) : []
+                ? await busy.findings(pids: Array(target.group.pids), settings: settings, waitForCPU: false,
+                                      minCPUWindow: autoPauseCPUWindow) : []
             // Focus may have moved, or the window or app frozen, resumed or rescheduled meanwhile.
             guard windowTimers[key] == nil, windowIdleSince[key] == since, !app.isTerminated,
                   usesWindowAutoPause(app), !isWindowFrozen(key), !isFrozenWhole(key.pid),
