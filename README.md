@@ -243,8 +243,9 @@ Quits the app the normal way — the same as pressing ⌘Q — so macOS and the 
 first. This is the only mechanism on macOS that returns **100% of an app's memory, swap
 included**. Waking relaunches it and restores your windows and tabs in seconds.
 
-Before the first use it shows a warning explaining exactly what will happen, tells you whether
-*that specific app* will restore its windows, and offers to enable window restore for it.
+Before a Deep Sleep it shows a warning explaining exactly what will happen, tells whether
+*that specific app* will restore its windows, and offers to enable window restore for it. For
+apps that restore their windows the warning appears once; for all others it appears every time.
 
 ### 🧠 Free Up Memory — the local model button, with a safety net
 

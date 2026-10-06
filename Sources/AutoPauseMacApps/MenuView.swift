@@ -390,7 +390,10 @@ private struct AppRow: View {
             if entry.canDeepSleep {
                 Button {
                     gate.check(.deepSleep, entry: entry, model: model) {
-                        if PauseFlags.hasSeenDeepSleepWarning {
+                        // The seen flag only covers apps that restore their windows; for the rest
+                        // the warning is the only notice that windows may be lost.
+                        if PauseFlags.hasSeenDeepSleepWarning,
+                           DeepSleepController.canRestoreState(bundleID: entry.bundleID).kind == .good {
                             model.deepSleep(entry)
                         } else {
                             showSleepWarning = true
@@ -406,7 +409,7 @@ private struct AppRow: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .help(gate.armed == .deepSleep ? forceHelp : "Deep Sleep \(entry.name) — quit it and free all its memory (recoverable)")
+                .help(gate.armed == .deepSleep ? forceHelp : "Deep Sleep \(entry.name): quit it and free all its memory, relaunch on Wake")
                 .popover(isPresented: $showSleepWarning, arrowEdge: .trailing) {
                     DeepSleepWarningView(
                         entry: entry,

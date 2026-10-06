@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Shown before the first Deep Sleep, so "this actually quits the app" is never a surprise.
+/// Shown before a Deep Sleep: always for apps that may not restore their windows, once for the rest,
+/// so "this actually quits the app" is never a surprise.
 struct DeepSleepWarningView: View {
     let entry: AppEntry
     let status: RestoreStatus
