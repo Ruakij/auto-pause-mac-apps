@@ -92,7 +92,9 @@ still frozen.
 
 ![Memory pressure dashboard showing a 77 percent ring gauge marked Warning, a usage history graph, and a breakdown of App 5.06 GB, Wired 2.43 GB, Compressed 4.97 GB, Free 436.5 MB and Swap Used 4.4 GB](docs/screenshots/system-dashboard.png)
 
-A real pressure gauge with Normal / Warning / Critical thresholds, usage history, and the full
+The memory pressure macOS itself reports (Normal / Warning / Critical, from
+`kern.memorystatus_vm_pressure_level`), a gauge of RAM used, usage history, the apps holding the
+most resident memory, and the full
 breakdown from `host_statistics64`: **App 5.06 GB · Wired 2.43 GB · Compressed 4.97 GB · Free
 436.5 MB · Swap 4.4 GB**.
 

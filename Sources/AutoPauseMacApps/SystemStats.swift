@@ -10,6 +10,12 @@ struct SystemStats {
     var freeBytes: UInt64
     var swapUsedBytes: UInt64
     var swapTotalBytes: UInt64
+    /// macOS memory pressure, `kern.memorystatus_vm_pressure_level`; nil if unreadable.
+    var pressureLevel: PressureLevel? = nil
+
+    enum PressureLevel: Int32 {
+        case normal = 1, warning = 2, critical = 4
+    }
 
     var usedBytes: UInt64 { appBytes + wiredBytes + compressedBytes }
     var usedFraction: Double {
@@ -28,7 +34,7 @@ struct SystemStats {
         guard kr == KERN_SUCCESS else {
             return SystemStats(totalBytes: UInt64(ProcessInfo.processInfo.physicalMemory),
                                 appBytes: 0, wiredBytes: 0, compressedBytes: 0, freeBytes: 0,
-                                swapUsedBytes: 0, swapTotalBytes: 0)
+                                swapUsedBytes: 0, swapTotalBytes: 0, pressureLevel: readPressureLevel())
         }
 
         let app = (UInt64(stats.internal_page_count) - UInt64(stats.purgeable_count)) * pageSize
@@ -47,7 +53,15 @@ struct SystemStats {
             compressedBytes: compressed,
             freeBytes: free,
             swapUsedBytes: UInt64(swapUsage.xsu_used),
-            swapTotalBytes: UInt64(swapUsage.xsu_total)
+            swapTotalBytes: UInt64(swapUsage.xsu_total),
+            pressureLevel: readPressureLevel()
         )
+    }
+
+    private static func readPressureLevel() -> PressureLevel? {
+        var level: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0) == 0 else { return nil }
+        return PressureLevel(rawValue: level)
     }
 }

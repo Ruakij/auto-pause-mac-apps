@@ -38,10 +38,14 @@ struct SystemDetailView: View {
                 RingGaugeView(fraction: stats.usedFraction)
                     .frame(width: 76, height: 76)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Memory Pressure").font(.system(size: 13, weight: .semibold))
-                    Text(pressureLabel)
-                        .font(.caption)
-                        .foregroundStyle(pressureColor)
+                    if let level = stats.pressureLevel {
+                        Text("Memory Pressure").font(.system(size: 13, weight: .semibold))
+                        Text(pressureLabel(level))
+                            .font(.caption)
+                            .foregroundStyle(pressureColor(level))
+                    } else {
+                        Text("Memory used").font(.system(size: 13, weight: .semibold))
+                    }
                     Text("\(MenuView.fmt(stats.usedBytes)) of \(MenuView.fmt(stats.totalBytes))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -76,7 +80,7 @@ struct SystemDetailView: View {
                 Text("TOP PROCESSES")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)
-                ForEach(model.entries.prefix(6)) { entry in
+                ForEach(topProcesses) { entry in
                     HStack {
                         if let icon = entry.icon {
                             Image(nsImage: icon).resizable().frame(width: 14, height: 14)
@@ -120,19 +124,24 @@ struct SystemDetailView: View {
         }
     }
 
-    private var pressureLabel: String {
-        switch stats.usedFraction {
-        case ..<0.6: return "Normal"
-        case ..<0.85: return "Warning"
-        default: return "Critical"
+    /// Slept apps hold no process; paused ones rank by what they still hold.
+    private var topProcesses: [AppEntry] {
+        Array(model.entries.filter { $0.state != .sleeping }.sorted { $0.resident > $1.resident }.prefix(6))
+    }
+
+    private func pressureLabel(_ level: SystemStats.PressureLevel) -> String {
+        switch level {
+        case .normal: return "Normal"
+        case .warning: return "Warning"
+        case .critical: return "Critical"
         }
     }
 
-    private var pressureColor: Color {
-        switch stats.usedFraction {
-        case ..<0.6: return .green
-        case ..<0.85: return .orange
-        default: return .red
+    private func pressureColor(_ level: SystemStats.PressureLevel) -> Color {
+        switch level {
+        case .normal: return .green
+        case .warning: return .orange
+        case .critical: return .red
         }
     }
 }
