@@ -57,7 +57,8 @@ Two sections:
   buttons to Pause (⏸), Deep Sleep (🌙) or open details.
 
 The footer holds **Free Up Memory**, **Resume All** (paused apps and windows), **Wake all**
-(relaunches deep-slept apps, shown only while there are any), settings and quit.
+(relaunches deep-slept apps, shown only while there are any), the gear that opens the
+Settings window (also Cmd-, while the panel is open) and quit.
 
 Look at the frozen **Mail** row: `9.5 MB` resident against `399.9 MB` footprint. Mail is holding
 9.5 MB of real RAM — the other ~390 MB has already been compressed or swapped out. That gap is
@@ -83,7 +84,9 @@ confirm button.**
 - **Recording and call apps** (QuickTime, OBS, ScreenFlow, Loom, Zoom, Teams, Meet, Discord,
   Slack…) start **unticked** and are flagged *"may be recording or in a call"*.
 - **Background services and daemons are never touched** — see below.
-- Optionally remember the opt-outs (checkbox, off by default) so those apps are never offered again.
+- Optionally remember the opt-outs (checkbox, off by default) so those apps are never offered
+  again. **Settings > Never Freeze** lists them under "Not offered in Free Up Memory", each with
+  a remove button.
 
 Afterwards, **Restore** puts back exactly the set it paused, leaving anything you froze by hand
 still frozen.
@@ -289,11 +292,11 @@ that display only footprint make pausing look like it did nothing at all.
 Because the app has no Dock icon and no window, a menu-bar-only utility can vanish the moment
 you install it. A short animated walkthrough runs on first launch: what the two tiers do, how
 Free Up Memory works, and an arrow pointing at where in the menu bar to find it — plus the
-option to start at login. You can reopen it any time from **Settings ▸ Show the walkthrough again**.
+option to start at login. You can reopen it any time from **Settings > General > Show the Walkthrough Again**.
 
 ### 🚀 Start at login
 
-Toggle it on in **Settings** (the gear in the footer) and the app registers itself with macOS's
+Toggle it on in **Settings > General** (the gear in the footer opens Settings) and the app registers itself with macOS's
 modern login-items system via `SMAppService` — the same list in System Settings ▸ General ▸ Login
 Items. No helper bundle, no deprecated APIs. The toggle reads the status back after registering
 rather than assuming it worked, so if macOS wants approval or the app isn't in `/Applications`
@@ -340,7 +343,7 @@ still running and turns the button into an orange **Force**; a second click with
 goes ahead. A row shown idle acts at once. Right after the panel opens, before a state is
 shown, the click checks first. Resume and Wake never ask.
 
-Each condition can be switched off in **Settings > Busy conditions**, along with the CPU threshold
+Each condition can be switched off in **Settings > Busy Conditions**, along with the CPU threshold
 and the command list (regular expressions on the full command line; invalid ones are not
 saved). All checks use public APIs and need no permission.
 
@@ -351,9 +354,10 @@ automatically, not by Free Up Memory, not by hand and not per window, and there 
 Their row shows a lock instead of Pause and no busy or idle state. Deep Sleep (a normal quit)
 stays available. The defaults: Finder, System Settings, Screen Sharing, Activity Monitor,
 Passwords, 1Password, Bitwarden, KeePassXC, GlobalProtect, Tunnelblick, WireGuard, UTM, Docker
-Desktop, Parallels Desktop and VMware Fusion. **Settings > Never freeze** lists them with name
+Desktop, Parallels Desktop and VMware Fusion. **Settings > Never Freeze** lists them with name
 and icon, removes entries, adds any listed app and restores the defaults. Removing an app from
-the list makes it freezable.
+the list makes it freezable. A second section there, **Not offered in Free Up Memory**, lists
+the apps opted out of the Free Up Memory checklist; removing one offers it again.
 
 ---
 

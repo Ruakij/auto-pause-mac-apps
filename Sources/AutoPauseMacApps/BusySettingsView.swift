@@ -4,7 +4,6 @@ import SwiftUI
 /// automatically and make a manual Pause or Deep Sleep ask for Force.
 struct BusySettingsView: View {
     @ObservedObject var model: AppListModel
-    let onBack: () -> Void
 
     private struct Draft: Identifiable {
         let id = UUID()
@@ -16,13 +15,6 @@ struct BusySettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Button(action: onBack) {
-                    Image(systemName: "chevron.left")
-                }
-                .buttonStyle(.plain)
-                Text("Busy conditions").font(.system(size: 13, weight: .semibold))
-            }
             Text("A busy app is not auto-paused, and pausing or deep-sleeping it by hand needs a second click.")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -62,6 +54,7 @@ struct BusySettingsView: View {
                         }
                         .buttonStyle(.plain)
                         .help("Remove")
+                        .accessibilityLabel("Remove pattern \(draft.text)")
                     }
                     if let error = BusySettings.patternError(draft.text) {
                         Text("\(error), not saved").font(.system(size: 9)).foregroundStyle(.red)
@@ -84,8 +77,7 @@ struct BusySettingsView: View {
             .buttonStyle(.plain)
             .disabled(!model.busySettings.enabled.contains(.processes))
         }
-        .padding(14)
-        .frame(width: 340)
+        .padding(20)
         .onAppear { drafts = model.busySettings.patterns.map { Draft(text: $0) } }
     }
 

@@ -5,9 +5,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Window groups need it to thaw on click and to idle per window; the system shows its
-        // prompt at most once per app identity, so asking on every launch costs nothing.
-        if !Accessibility.isTrusted { Accessibility.requestTrust() }
         if !PauseFlags.hasCompletedOnboarding {
             // Give the status item a moment to appear so the "look up here" hint lands
             // on a menu bar that already shows our icon.
@@ -62,10 +59,14 @@ struct PauseApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuView(model: model, showOnboarding: { appDelegate.showOnboarding() })
+            MenuView(model: model)
         } label: {
             Image(systemName: model.pausedCount + model.frozenWindowCount > 0 ? "pause.circle.fill" : "pause.circle")
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView(model: model, showOnboarding: { appDelegate.showOnboarding() })
+        }
     }
 }

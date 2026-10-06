@@ -73,6 +73,10 @@ final class AppSettingsStore {
         return existing
     }
 
+    var excludedFromReclaim: [String] {
+        byBundle.values.filter(\.excludedFromReclaim).map(\.bundleID).sorted()
+    }
+
     func update(_ settings: AppSettings) {
         guard !settings.bundleID.isEmpty else { return }
         byBundle[settings.bundleID] = settings

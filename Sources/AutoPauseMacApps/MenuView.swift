@@ -2,15 +2,9 @@ import SwiftUI
 
 struct MenuView: View {
     @ObservedObject var model: AppListModel
-    /// Lets the user re-open the first-run walkthrough from the menu.
-    var showOnboarding: () -> Void = {}
+    @Environment(\.openSettings) private var openSettings
     @State private var showSystemDetail = false
     @State private var showReclaim = false
-    @State private var launchAtLogin = LaunchAtLogin.isEnabled
-    @State private var showSettings = false
-    @State private var settingsPage: SettingsPage?
-
-    private enum SettingsPage { case busyConditions, neverFreeze }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,6 +55,7 @@ struct MenuView: View {
                 Image(systemName: "xmark").font(.system(size: 8))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -70,7 +65,7 @@ struct MenuView: View {
     private var header: some View {
         VStack(spacing: 4) {
             HStack {
-                Text("Pause").font(.headline)
+                Text("Auto Pause").font(.headline)
                 Spacer()
                 if model.pausedCount > 0 {
                     Label("\(model.pausedCount) suspended", systemImage: "pause.circle.fill")
@@ -165,127 +160,28 @@ struct MenuView: View {
             }
             Spacer()
             Button {
-                showSettings = true
+                openSettings()
+                // An LSUIElement app is not active, so its Settings window would open behind
+                // the frontmost app.
+                NSApp.activate(ignoringOtherApps: true)
             } label: {
                 Image(systemName: "gearshape.fill")
             }
             .help("Settings")
-            .popover(isPresented: $showSettings, arrowEdge: .top) {
-                switch settingsPage {
-                case .busyConditions: BusySettingsView(model: model) { settingsPage = nil }
-                case .neverFreeze: NeverFreezeSettingsView(model: model) { settingsPage = nil }
-                case nil: settingsPanel
-                }
-            }
-            .onChange(of: showSettings) { _, _ in settingsPage = nil }
+            .accessibilityLabel("Settings")
+            .keyboardShortcut(",", modifiers: .command)
 
             Button {
                 NSApp.terminate(nil)
             } label: {
                 Image(systemName: "power")
             }
-            .help("Quit Pause (resumes frozen apps)")
+            .help("Quit Auto Pause (resumes paused apps)")
+            .accessibilityLabel("Quit Auto Pause")
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-    }
-
-    private var settingsPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Settings").font(.system(size: 13, weight: .semibold))
-
-            Toggle(isOn: $launchAtLogin) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Start at login").font(.system(size: 12, weight: .medium))
-                    Text("Keep it running so it's there when you need it")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-            }
-            .toggleStyle(.switch)
-            .onChange(of: launchAtLogin) { _, wants in
-                if case .failure(let error) = LaunchAtLogin.set(wants) {
-                    model.notice = "Couldn't change the login item: \(error.localizedDescription)"
-                    launchAtLogin = LaunchAtLogin.isEnabled
-                }
-            }
-
-            if LaunchAtLogin.requiresApproval {
-                Button {
-                    LaunchAtLogin.openLoginItemsSettings()
-                } label: {
-                    Label("Approve in System Settings", systemImage: "arrow.up.forward.app")
-                        .font(.caption2)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.orange)
-            }
-
-            accessibilityRow
-
-            Divider()
-
-            pageLink("Busy conditions", systemImage: "hourglass", page: .busyConditions)
-            pageLink("Never freeze", systemImage: "lock", page: .neverFreeze)
-
-            Button {
-                showSettings = false
-                showOnboarding()
-            } label: {
-                Label("Show the walkthrough again", systemImage: "sparkles")
-                    .font(.caption)
-            }
-            .buttonStyle(.plain)
-
-            Link(destination: URL(string: "https://github.com/fazalrshah/auto-pause-mac-apps")!) {
-                Label("Source & docs on GitHub", systemImage: "link")
-                    .font(.caption)
-            }
-        }
-        .padding(14)
-        .frame(width: 250)
-        .onAppear { launchAtLogin = LaunchAtLogin.isEnabled }
-    }
-
-    private func pageLink(_ title: String, systemImage: String, page: SettingsPage) -> some View {
-        Button {
-            settingsPage = page
-        } label: {
-            HStack {
-                Label(title, systemImage: systemImage).font(.caption)
-                Spacer()
-                Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// Read on every render: trust can be granted while the app runs.
-    @ViewBuilder
-    private var accessibilityRow: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack {
-                Text("Accessibility").font(.system(size: 12, weight: .medium))
-                Spacer()
-                if Accessibility.isTrusted {
-                    Label("Allowed", systemImage: "checkmark.circle.fill")
-                        .font(.caption2).foregroundStyle(.green)
-                }
-            }
-            Text("Pauses single VS Code windows and resumes one when it is clicked")
-                .font(.system(size: 10)).foregroundStyle(.secondary)
-            if !Accessibility.isTrusted {
-                Button {
-                    Accessibility.openSettings()
-                } label: {
-                    Label("Allow in System Settings", systemImage: "arrow.up.forward.app")
-                        .font(.caption2)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.orange)
-            }
-        }
     }
 
     /// Tall enough for every row, capped at the screen. Computed from row counts with fixed

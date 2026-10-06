@@ -459,7 +459,13 @@ final class AppListModel: ObservableObject {
 
     /// Remember that an app should never be offered by Free Up Memory again.
     func setExcludedFromReclaim(_ excluded: Bool, for entry: AppEntry) {
-        guard let id = entry.bundleID, !id.isEmpty else { return }
+        guard let id = entry.bundleID else { return }
+        setExcludedFromReclaim(excluded, bundleID: id)
+    }
+
+    func setExcludedFromReclaim(_ excluded: Bool, bundleID id: String) {
+        guard !id.isEmpty else { return }
+        objectWillChange.send()
         var settings = AppSettingsStore.shared.settings(for: id)
         settings.bundleID = id
         settings.excludedFromReclaim = excluded
