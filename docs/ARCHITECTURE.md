@@ -79,7 +79,8 @@ The only mechanism on macOS that frees **all** of an app's memory including swap
   failed relaunch erased the app from the UI permanently.
 
 **Your work is never at risk.** Apps that autosave save and quit. Apps that don't show their
-normal save sheet and stay open; Pause reports `.refused` and leaves them merely frozen.
+normal save sheet and stay open; Pause reports `.refused`, leaves them running (never frozen, so
+the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) and stays open".
 
 ---
 
@@ -116,7 +117,7 @@ normal save sheet and stay open; Pause reports `.refused` and leaves them merely
 - **Never freeze** - `neverFreeze` (bundle IDs, `NeverFreezeList` in `BusySettings.swift`,
   `UserDefaults` key `PauseNeverFreezeBundleIDs`; absent = defaults, otherwise the full list so a
   removed default stays removed). Every freeze goes through `freeze(root:bundleID:)`: manual
-  Pause, auto-pause, Free Up Memory, a refused Deep Sleep (such an app is left running) and
+  Pause, auto-pause, Free Up Memory and
   window groups. It refuses listed apps; there is no Force. Listed apps get no auto-pause or
   window timers and are not Free Up Memory candidates. Deep Sleep stays available.
 - **Thaw on activation** — when `didActivateApplicationNotification` names a frozen pid (in

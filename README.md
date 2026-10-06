@@ -365,7 +365,7 @@ paid upgrade. The complete source is in this repository.
 
 No. Pause never touches your data — the app is frozen in memory, exactly as it was. Deep Sleep
 quits the app the normal way: apps that autosave save first, and apps that don't show their usual
-"Do you want to save?" dialog and stay open, in which case the app is left frozen instead.
+"Do you want to save?" dialog and stay open, in which case the app is left running with a notice.
 **Nothing is ever force-quit.** No `SIGKILL`, ever.
 
 ### Why does macOS say "Apple could not verify this app"?

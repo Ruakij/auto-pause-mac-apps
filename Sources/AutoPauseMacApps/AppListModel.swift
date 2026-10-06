@@ -637,8 +637,8 @@ final class AppListModel: ObservableObject {
         bundleID.map(neverFreeze.contains) ?? false
     }
 
-    /// The one place anything is frozen: a manual Pause, auto-pause, Free Up Memory, a refused
-    /// Deep Sleep and window groups (`root` is then a window root of the app). Apps on the
+    /// The one place anything is frozen: a manual Pause, auto-pause, Free Up Memory
+    /// and window groups (`root` is then a window root of the app). Apps on the
     /// Never freeze list are refused here, with no Force. `pauseTree` keeps its own guard
     /// against freezing this process.
     private func freeze(root: pid_t, bundleID: String?) -> Bool {
@@ -687,17 +687,11 @@ final class AppListModel: ObservableObject {
                 PausedStore.shared.remove(pid: pid)
                 footprintAtPause[pid] = nil
             case .refused:
-                // Almost always an unsaved-work save sheet. Leave it frozen instead, unless
-                // it must never be frozen.
-                guard freeze(root: pid, bundleID: entry.bundleID) else {
-                    notice = "\(entry.name) has unsaved work, so it was left running instead of quit."
-                    break
-                }
-                notice = "\(entry.name) has unsaved work, so it was left frozen instead of quit."
-                footprintAtPause[pid] = footprint
-                PausedStore.shared.add(PausedRecord(
-                    pid: pid, bundleID: entry.bundleID, name: entry.name, launchDate: entry.launchDate))
-                cancelWindowTimers(pid)
+                // Almost always a save sheet. Freezing would leave the sheet unanswerable, so
+                // the app stays running; `sleep` thawed it if it was paused.
+                PausedStore.shared.remove(pid: pid)
+                footprintAtPause[pid] = nil
+                notice = "\(entry.name) did not quit (unsaved changes?) and stays open."
             case .failed(let message):
                 notice = "\(entry.name): \(message)"
             }
