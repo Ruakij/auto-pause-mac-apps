@@ -82,7 +82,7 @@ confirm button.**
 - **Recording and call apps** (QuickTime, OBS, ScreenFlow, Loom, Zoom, Teams, Meet, Discord,
   Slack…) start **unticked** and are flagged *"may be recording or in a call"*.
 - **Background services and daemons are never touched** — see below.
-- Optionally remember your opt-outs so those apps are never offered again.
+- Optionally remember the opt-outs (checkbox, off by default) so those apps are never offered again.
 
 Afterwards, **Restore** puts back exactly the set it paused, leaving anything you froze by hand
 still frozen.

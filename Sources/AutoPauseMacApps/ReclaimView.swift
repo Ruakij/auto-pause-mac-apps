@@ -13,7 +13,7 @@ struct ReclaimView: View {
     /// Apps ticked for pausing. Everything starts ticked; unticking is how you opt out.
     @State private var selected: Set<String> = []
     @State private var candidates: [AppEntry] = []
-    @State private var rememberOptOuts = true
+    @State private var rememberOptOuts = false
     /// What keeps each candidate busy, by entry id; nil until the check has finished.
     @State private var busy: [String: [BusyFinding]]?
 
