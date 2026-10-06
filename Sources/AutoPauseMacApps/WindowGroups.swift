@@ -26,6 +26,10 @@ struct WindowMapping: Equatable {
 /// (AppKit apps, Chromium browsers, untested Electron apps) gets nil and is shown ungrouped.
 enum WindowGroups {
 
+    static func isSupported(_ app: NSRunningApplication) -> Bool {
+        app.bundleIdentifier.map(VSCodeWindows.bundleIds.contains) ?? false
+    }
+
     static func mapping(for app: NSRunningApplication) async -> WindowMapping? {
         guard let id = app.bundleIdentifier, VSCodeWindows.bundleIds.contains(id),
               let executable = app.executableURL, let bundle = app.bundleURL else { return nil }

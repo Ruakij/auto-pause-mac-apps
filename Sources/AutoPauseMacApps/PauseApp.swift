@@ -5,6 +5,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Window groups need it to thaw on click and to idle per window; the system shows its
+        // prompt at most once per app identity, so asking on every launch costs nothing.
+        if !Accessibility.isTrusted { Accessibility.requestTrust() }
         if !PauseFlags.hasCompletedOnboarding {
             // Give the status item a moment to appear so the "look up here" hint lands
             // on a menu bar that already shows our icon.
@@ -15,9 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Never strand frozen apps: resume everything on quit.
-        for rec in PausedStore.shared.records {
-            ProcessControl.resumeTree(root: rec.pid)
+        // Never strand frozen apps or windows: resume everything on quit.
+        for rec in PausedStore.shared.resumeOrder {
+            // A window record's pid may belong to another process by now.
+            if rec.ownerPid == nil || rec.isLive { ProcessControl.resumeTree(root: rec.pid) }
             PausedStore.shared.remove(pid: rec.pid)
         }
     }
@@ -60,7 +64,7 @@ struct PauseApp: App {
         MenuBarExtra {
             MenuView(model: model, showOnboarding: { appDelegate.showOnboarding() })
         } label: {
-            Image(systemName: model.pausedCount > 0 ? "pause.circle.fill" : "pause.circle")
+            Image(systemName: model.pausedCount + model.frozenWindowCount > 0 ? "pause.circle.fill" : "pause.circle")
         }
         .menuBarExtraStyle(.window)
     }

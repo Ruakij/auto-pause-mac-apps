@@ -32,12 +32,6 @@ final class BusyDetector {
     /// measures against the sample of the previous one.
     private let maxSampleAge: UInt64 = 120 * NSEC_PER_SEC
 
-    private static let ticksToNanos: (numer: UInt64, denom: UInt64) = {
-        var tb = mach_timebase_info_data_t()
-        mach_timebase_info(&tb)
-        return (UInt64(tb.numer), UInt64(tb.denom))
-    }()
-
     /// One result per tree. System-wide lists (audio objects, power assertions, the IORegistry)
     /// are read once for all trees, and the CPU wait for missing samples happens at most once.
     /// Without `waitForCPU`, a tree with no recent CPU sample at all is only sampled and its
@@ -109,18 +103,7 @@ final class BusyDetector {
     }
 
     private static func cpuSample(_ pid: pid_t) -> CPUSample? {
-        var info = rusage_info_current()
-        let ok = withUnsafeMutablePointer(to: &info) { ptr -> Int32 in
-            ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
-                proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
-            }
-        }
-        guard ok == 0 else { return nil }
-        // ri_*_time are mach ticks, not ns (41.67 ns per tick on Apple silicon).
-        let ticks = info.ri_user_time + info.ri_system_time
-        let nanos = ticks.multipliedFullWidth(by: ticksToNanos.numer)
-        let cpu = ticksToNanos.denom.dividingFullWidth(nanos).quotient
-        return CPUSample(cpuNanos: cpu, uptimeNanos: DispatchTime.now().uptimeNanoseconds)
+        ProcessControl.cpuTimeNanos(of: pid).map { CPUSample(cpuNanos: $0, uptimeNanos: DispatchTime.now().uptimeNanoseconds) }
     }
 
     // MARK: Audio
@@ -411,6 +394,15 @@ final class BusyEvaluator: @unchecked Sendable {
             queue.async {
                 let trees = roots.map { ProcessControl.processTree(root: $0) }
                 cont.resume(returning: self.detector.findings(forTrees: trees, settings: settings, waitForCPU: waitForCPU))
+            }
+        }
+    }
+
+    /// Findings over exactly these pids, e.g. one window group, as one tree.
+    func findings(pids: [pid_t], settings: BusySettings, waitForCPU: Bool = true) async -> [BusyFinding]? {
+        await withCheckedContinuation { cont in
+            queue.async {
+                cont.resume(returning: self.detector.findings(forTrees: [pids], settings: settings, waitForCPU: waitForCPU)[0])
             }
         }
     }

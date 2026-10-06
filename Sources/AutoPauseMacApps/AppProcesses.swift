@@ -46,25 +46,6 @@ enum AppProcesses {
         return pid_t(info.pbi_ppid)
     }
 
-    /// User + system CPU time in nanoseconds; diff two samples for a CPU percentage.
-    static func cpuTimeNanos(of pid: pid_t) -> UInt64 {
-        var info = rusage_info_current()
-        let ok = withUnsafeMutablePointer(to: &info) { ptr -> Int32 in
-            ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
-                proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
-            }
-        }
-        guard ok == 0 else { return 0 }
-        // rusage CPU times are mach ticks, not ns (125/3 on Apple Silicon).
-        return (info.ri_user_time + info.ri_system_time) * UInt64(timebase.numer) / UInt64(timebase.denom)
-    }
-
-    private static let timebase: mach_timebase_info_data_t = {
-        var tb = mach_timebase_info_data_t()
-        mach_timebase_info(&tb)
-        return tb
-    }()
-
     /// argv and environment of a same-user process (KERN_PROCARGS2); nil for other users.
     static func commandLine(of pid: pid_t) -> (args: [String], env: [String: String])? {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]

@@ -20,8 +20,50 @@ struct AppEntry: Identifiable, Equatable {
     let state: AppState
     let launchDate: Date?
     let history: [UInt64]
+    /// Window groups frozen on their own, and the app's window count when a mapping is known.
+    var frozenWindows: Int = 0
+    var windowCount: Int? = nil
 
     var canDeepSleep: Bool { state != .sleeping }
+}
+
+/// One process of an expanded row. View-only.
+struct ProcessStat: Identifiable, Equatable {
+    let pid: pid_t
+    let name: String
+    let role: String?
+    /// Depth in the app's process tree, the app itself at 0.
+    let depth: Int
+    let resident: UInt64
+    /// Since the previous refresh; nil on the first sample.
+    let cpuPercent: Double?
+    let stopped: Bool
+    var id: pid_t { pid }
+}
+
+struct WindowDetail: Identifiable, Equatable {
+    let id: Int
+    let title: String
+    let processes: [ProcessStat]
+    let frozen: Bool
+    var resident: UInt64 { processes.reduce(0) { $0 + $1.resident } }
+    var cpuPercent: Double? {
+        let values = processes.compactMap(\.cpuPercent)
+        return values.isEmpty ? nil : values.reduce(0, +)
+    }
+}
+
+/// Contents of an expanded row: the flat process tree, or windows plus the shared rest.
+struct AppDetail: Equatable {
+    var processes: [ProcessStat]
+    /// Nil for apps without a window mapping.
+    var windows: [WindowDetail]?
+    var shared: [ProcessStat]
+}
+
+struct WindowKey: Hashable {
+    let pid: pid_t
+    let window: Int
 }
 
 @MainActor
@@ -39,6 +81,39 @@ final class AppListModel: ObservableObject {
     @Published var busySettings = BusySettings.load() {
         didSet { busySettings.save() }
     }
+    /// App rows expanded into their processes; only these are sampled per process.
+    @Published private(set) var expanded: Set<pid_t> = []
+    @Published private(set) var details: [pid_t: AppDetail] = [:]
+    /// Window groups frozen on their own, over all apps.
+    @Published private(set) var frozenWindowCount = 0
+
+    /// Previous CPU sample per process of expanded rows, for the CPU % between refreshes.
+    private var cpuSamples: [pid_t: (cpu: UInt64, at: UInt64)] = [:]
+    private struct CachedMapping {
+        let mapping: WindowMapping?
+        let at: Date
+        /// Direct children of the app when fetched; a window opening or closing changes them.
+        let children: Set<pid_t>
+    }
+    private var mappings: [pid_t: CachedMapping] = [:]
+    private var mappingRequests: [pid_t: Task<WindowMapping?, Never>] = [:]
+    private let mappingMaxAge: TimeInterval = 30
+    /// AX focus observers for apps with frozen windows or per-window auto-pause.
+    private var focusObservers: [pid_t: WindowFocusObserver] = [:]
+    /// Focused window of the frontmost app, when it is a mapped app.
+    private var focusedWindow: [pid_t: Int] = [:]
+    /// Per-window idle clock: when the window last stopped being the focused window of the
+    /// frontmost app, or when it was first seen.
+    private var windowIdleSince: [WindowKey: Date] = [:]
+    private var windowTimers: [WindowKey: Timer] = [:]
+    /// When observer creation for the pid last failed; retried after a minute, on app launch or
+    /// quit, or when Accessibility trust changes, not on every refresh (each try is AX IPC).
+    private var focusObserverFailed: [pid_t: Date] = [:]
+    private var wasTrusted = Accessibility.isTrusted
+    /// Global mouse-down and key-down monitor, installed while any window is frozen.
+    private var eventMonitor: Any?
+    /// Exit watchers on the unfrozen renderers of apps with frozen windows, keyed by renderer.
+    private var exitWatchers: [pid_t: DispatchSourceProcess] = [:]
 
     /// Rolling per-app resident samples for the sparklines. ~40 samples at 3s ≈ 2 minutes.
     private var history: [pid_t: [UInt64]] = [:]
@@ -70,6 +145,7 @@ final class AppListModel: ObservableObject {
                      NSWorkspace.didTerminateApplicationNotification] {
             observers.append(center.addObserver(forName: note, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
+                    self?.focusObserverFailed = [:]
                     self?.rescheduleAutoPause()
                     self?.refresh()
                 }
@@ -90,6 +166,11 @@ final class AppListModel: ObservableObject {
                                              object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.rescheduleAutoPause() }
         })
+        // Logout and shutdown quit every app, and an app with a frozen window cannot quit.
+        observers.append(center.addObserver(forName: NSWorkspace.willPowerOffNotification,
+                                             object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.resumeAllWindows() }
+        })
         rescheduleAutoPause()
         refresh()
     }
@@ -97,10 +178,21 @@ final class AppListModel: ObservableObject {
     /// The activation notification arrives while a frozen app is still stopped, so thawing
     /// here is what lets a Dock click or Cmd-Tab bring it back. Applies to every frozen app,
     /// however it was frozen.
+    /// Window groups frozen on their own stay frozen: only the window the user clicks into is
+    /// thawed, by the focus observer.
     private func didActivate(pid: pid_t) {
         frontPid = pid
+        if focusObservers[pid] != nil {
+            // A click into the window that was already focused changes no focus, so read the
+            // focused window once activation has settled.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(300))
+                guard frontPid == pid else { return }
+                noteFocus(pid: pid, title: Accessibility.focusedWindowTitle(pid: pid))
+            }
+        }
         if ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid) {
-            ProcessControl.resumeTree(root: pid)
+            ProcessControl.resumeTree(root: pid, keepStopped: windowRecordPids(pid))
             PausedStore.shared.remove(pid: pid)
             footprintAtPause[pid] = nil
             reclaimSession.removeAll { $0 == pid }
@@ -109,12 +201,16 @@ final class AppListModel: ObservableObject {
         } else {
             lastFrontDate[pid] = Date()
         }
-        cancelAutoPause(pid)
+        // Cancels the app timer of the frontmost app; re-arms window timers after a resume.
+        scheduleAutoPause(pid)
     }
 
     /// The idle clock starts when an app leaves the front, not when it came there.
     private func didDeactivate(pid: pid_t) {
         if frontPid == pid { frontPid = nil }
+        if let window = focusedWindow.removeValue(forKey: pid) {
+            windowIdleSince[WindowKey(pid: pid, window: window)] = Date()
+        }
         lastFrontDate[pid] = Date()
         scheduleAutoPause(pid)
     }
@@ -155,6 +251,8 @@ final class AppListModel: ObservableObject {
         let livePids = Set(apps.map(\.processIdentifier))
         history = history.filter { livePids.contains($0.key) }
         footprintAtPause = footprintAtPause.filter { livePids.contains($0.key) }
+        expanded = expanded.filter { livePids.contains($0) }
+        mappings = mappings.filter { livePids.contains($0.key) }
 
         var newEntries: [AppEntry] = []
 
@@ -188,7 +286,9 @@ final class AppListModel: ObservableObject {
                 reclaimedBytes: reclaimed,
                 state: paused ? .paused : .running,
                 launchDate: app.launchDate,
-                history: history[pid] ?? []
+                history: history[pid] ?? [],
+                frozenWindows: Set(PausedStore.shared.windowRecords(owner: pid).compactMap(\.windowId)).count,
+                windowCount: mappings[pid]?.mapping?.groups.count
             ))
         }
 
@@ -224,6 +324,19 @@ final class AppListModel: ObservableObject {
             return lhs.resident > rhs.resident
         }
         pausedCount = entries.filter { $0.state != .running }.count
+        frozenWindowCount = entries.reduce(0) { $0 + $1.frozenWindows }
+
+        var newDetails: [pid_t: AppDetail] = [:]
+        for app in apps where expanded.contains(app.processIdentifier) {
+            updateMapping(for: app)
+            newDetails[app.processIdentifier] = detail(for: app)
+        }
+        details = newDetails
+        let sampled = Set(newDetails.values.flatMap { $0.processes.map(\.pid) })
+        cpuSamples = cpuSamples.filter { sampled.contains($0.key) }
+        syncFocusObservers()
+        syncEventMonitor()
+        syncExitWatchers()
 
         let stats = SystemStats.current()
         systemStats = stats
@@ -265,6 +378,7 @@ final class AppListModel: ObservableObject {
             }
             PausedStore.shared.add(PausedRecord(
                 pid: pid, bundleID: entry.bundleID, name: entry.name, launchDate: entry.launchDate))
+            cancelWindowTimers(pid)
             freed += entry.resident
             touched.append(pid)
         }
@@ -284,7 +398,7 @@ final class AppListModel: ObservableObject {
     /// Undo exactly what the last reclaim froze, leaving anything you froze by hand alone.
     func restoreReclaimSession() {
         for pid in reclaimSession {
-            ProcessControl.resumeTree(root: pid)
+            ProcessControl.resumeTree(root: pid, keepStopped: windowRecordPids(pid))
             PausedStore.shared.remove(pid: pid)
             footprintAtPause[pid] = nil
             lastFrontDate[pid] = Date()
@@ -312,10 +426,14 @@ final class AppListModel: ObservableObject {
         let apps = listedApps()
         let livePids = Set(apps.map(\.processIdentifier))
         lastFrontDate = lastFrontDate.filter { livePids.contains($0.key) }
+        focusedWindow = focusedWindow.filter { livePids.contains($0.key) }
+        windowIdleSince = windowIdleSince.filter { livePids.contains($0.key.pid) }
         for pid in autoPauseTimers.keys where !livePids.contains(pid) { cancelAutoPause(pid) }
+        for key in windowTimers.keys where !livePids.contains(key.pid) { windowTimers.removeValue(forKey: key)?.invalidate() }
         for app in apps where app.processIdentifier > 0 {
             scheduleAutoPause(app.processIdentifier, app: app)
         }
+        syncFocusObservers()
     }
 
     private func cancelAutoPause(_ pid: pid_t) {
@@ -323,9 +441,16 @@ final class AppListModel: ObservableObject {
     }
 
     /// Arms the timer for `lastFrontDate + minutes`, or for `at` when re-checking a busy app.
+    /// Apps with per-window auto-pause get window timers instead.
     private func scheduleAutoPause(_ pid: pid_t, app: NSRunningApplication? = nil, at: Date? = nil) {
         cancelAutoPause(pid)
         guard let app = app ?? NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+        if usesWindowAutoPause(app) {
+            // A frozen app idles as a whole; its windows are re-armed when it resumes.
+            if isFrozenWhole(pid) { cancelWindowTimers(pid) } else { scheduleWindowTimers(pid, app: app) }
+            return
+        }
+        cancelWindowTimers(pid)
         let settings = AppSettingsStore.shared.settings(for: app.bundleIdentifier)
         guard settings.autoPauseEnabled, app.activationPolicy == .regular, pid != frontPid,
               !ProcessControl.isStopped(pid), !PausedStore.shared.contains(pid: pid) else { return }
@@ -345,7 +470,7 @@ final class AppListModel: ObservableObject {
     private func autoPauseFired(_ pid: pid_t) {
         autoPauseTimers[pid] = nil
         guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated,
-              app.activationPolicy == .regular, pid != frontPid else { return }
+              app.activationPolicy == .regular, pid != frontPid, !usesWindowAutoPause(app) else { return }
         let since = lastFrontDate[pid]
         let settings = busySettings
         Task { @MainActor in
@@ -356,6 +481,7 @@ final class AppListModel: ObservableObject {
             guard autoPauseTimers[pid] == nil, lastFrontDate[pid] == since,
                   !app.isTerminated, app.activationPolicy == .regular, pid != frontPid,
                   AppSettingsStore.shared.settings(for: app.bundleIdentifier).autoPauseEnabled,
+                  !usesWindowAutoPause(app),
                   !ProcessControl.isStopped(pid), !PausedStore.shared.contains(pid: pid) else { return }
             guard let findings else {
                 scheduleAutoPause(pid, app: app, at: Date().addingTimeInterval(cpuSampleRetryInterval))
@@ -371,6 +497,7 @@ final class AppListModel: ObservableObject {
             PausedStore.shared.add(PausedRecord(
                 pid: pid, bundleID: app.bundleIdentifier,
                 name: app.localizedName ?? "Unknown", launchDate: app.launchDate))
+            cancelWindowTimers(pid)
             refresh()
         }
     }
@@ -381,6 +508,11 @@ final class AppListModel: ObservableObject {
     func busyFindings(for entry: AppEntry) async -> [BusyFinding] {
         guard let pid = entry.pid else { return [] }
         return await busy.findings(roots: [pid], settings: busySettings)[0] ?? []
+    }
+
+    /// What keeps these processes (one window group) busy right now.
+    func busyFindings(pids: [pid_t]) async -> [BusyFinding] {
+        await busy.findings(pids: pids, settings: busySettings) ?? []
     }
 
     /// Busy findings for several apps in one pass, keyed by entry id.
@@ -398,6 +530,7 @@ final class AppListModel: ObservableObject {
         guard ProcessControl.pauseTree(root: pid) else { return }
         PausedStore.shared.add(PausedRecord(
             pid: pid, bundleID: entry.bundleID, name: entry.name, launchDate: entry.launchDate))
+        cancelWindowTimers(pid)
         refresh()
     }
 
@@ -407,7 +540,7 @@ final class AppListModel: ObservableObject {
             return
         }
         guard let pid = entry.pid else { return }
-        ProcessControl.resumeTree(root: pid)
+        ProcessControl.resumeTree(root: pid, keepStopped: windowRecordPids(pid))
         PausedStore.shared.remove(pid: pid)
         footprintAtPause[pid] = nil
         lastFrontDate[pid] = Date()
@@ -418,6 +551,11 @@ final class AppListModel: ObservableObject {
     func deepSleep(_ entry: AppEntry) {
         guard let app = runningApp(for: entry), let pid = entry.pid else { return }
         let footprint = entry.footprint
+        // Its frozen windows could not handle the quit.
+        for rec in PausedStore.shared.windowRecords(owner: pid) {
+            if rec.isLive { ProcessControl.resumeTree(root: rec.pid) }
+            PausedStore.shared.remove(pid: rec.pid)
+        }
         Task { @MainActor in
             let result = await DeepSleepController.sleep(app: app, name: entry.name, footprint: footprint)
             switch result {
@@ -431,6 +569,7 @@ final class AppListModel: ObservableObject {
                 ProcessControl.pauseTree(root: pid)
                 PausedStore.shared.add(PausedRecord(
                     pid: pid, bundleID: entry.bundleID, name: entry.name, launchDate: entry.launchDate))
+                cancelWindowTimers(pid)
             case .failed(let message):
                 notice = "\(entry.name): \(message)"
             }
@@ -452,9 +591,13 @@ final class AppListModel: ObservableObject {
     }
 
     func resumeAll() {
-        for rec in PausedStore.shared.records {
-            ProcessControl.resumeTree(root: rec.pid)
+        for rec in PausedStore.shared.resumeOrder {
+            // A window record's pid may belong to another process by now.
+            if rec.ownerPid == nil || rec.isLive { ProcessControl.resumeTree(root: rec.pid) }
             PausedStore.shared.remove(pid: rec.pid)
+            if let owner = rec.ownerPid, let window = rec.windowId {
+                windowIdleSince[WindowKey(pid: owner, window: window)] = Date()
+            }
         }
         for entry in entries where entry.state == .paused {
             if let pid = entry.pid {
@@ -469,5 +612,412 @@ final class AppListModel: ObservableObject {
             refresh()
         }
         refresh()
+    }
+
+    // MARK: - Process lists
+
+    func toggleExpanded(_ pid: pid_t) {
+        if expanded.contains(pid) { expanded.remove(pid) } else { expanded.insert(pid) }
+        refresh()
+    }
+
+    /// The app's process tree in tree order with memory and CPU, split into windows when the
+    /// app has a mapping or frozen window records.
+    private func detail(for app: NSRunningApplication) -> AppDetail {
+        let pid = app.processIdentifier
+        let list = AppProcesses.list(appPid: pid)
+        let byParent = Dictionary(grouping: list, by: \.ppid)
+        var ordered: [(process: AppProcess, depth: Int)] = []
+        func walk(_ p: AppProcess, _ depth: Int) {
+            ordered.append((p, depth))
+            for child in (byParent[p.pid] ?? []).sorted(by: { $0.pid < $1.pid }) where child.pid != p.pid {
+                walk(child, depth + 1)
+            }
+        }
+        if let root = list.first { walk(root, 0) }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        let rows: [ProcessStat] = ordered.map { p, depth in
+            var percent: Double?
+            if let cpu = ProcessControl.cpuTimeNanos(of: p.pid) {
+                if let prev = cpuSamples[p.pid], cpu >= prev.cpu, now > prev.at {
+                    percent = Double(cpu - prev.cpu) / Double(now - prev.at) * 100
+                }
+                cpuSamples[p.pid] = (cpu, now)
+            }
+            return ProcessStat(pid: p.pid, name: p.name, role: p.role, depth: depth,
+                               resident: ProcessControl.memoryInfo(of: p.pid).resident,
+                               cpuPercent: percent, stopped: ProcessControl.isStopped(p.pid))
+        }
+
+        let mapping = mappings[pid]?.mapping
+        let records = PausedStore.shared.windowRecords(owner: pid)
+        guard mapping != nil || !records.isEmpty else { return AppDetail(processes: rows, windows: nil, shared: []) }
+
+        var groups: [(id: Int, title: String?, roots: [pid_t])] =
+            (mapping?.groups ?? []).map { ($0.id, $0.title, Array($0.anchors.values)) }
+        // A frozen window missing from the mapping (fetched before the freeze, or a pid the
+        // fetch could not place) is still listed so it can be resumed.
+        for (id, recs) in Dictionary(grouping: records, by: { $0.windowId ?? -1 }) where !groups.contains(where: { $0.id == id }) {
+            groups.append((id, recs.first?.windowTitle, recs.map(\.pid)))
+        }
+        let frozenIds = Set(records.compactMap(\.windowId))
+        var claimed = Set<pid_t>()
+        let windows = groups.sorted { $0.id < $1.id }.map { g -> WindowDetail in
+            let pids = Set(g.roots.flatMap { ProcessControl.processTree(root: $0) })
+            claimed.formUnion(pids)
+            let title = g.title ?? records.first { $0.windowId == g.id }?.windowTitle ?? "Window \(g.id)"
+            return WindowDetail(id: g.id, title: title, processes: rows.filter { pids.contains($0.pid) },
+                                frozen: frozenIds.contains(g.id))
+        }
+        return AppDetail(processes: rows, windows: windows, shared: rows.filter { !claimed.contains($0.pid) })
+    }
+
+    // MARK: - Window mappings
+
+    /// The app's window mapping, fetched again off the main thread (`code --status` takes
+    /// seconds) when older than `maxAge` (30 s by default) or when the app's direct children
+    /// changed.
+    private func mapping(for app: NSRunningApplication, maxAge: TimeInterval? = nil) async -> WindowMapping? {
+        let pid = app.processIdentifier
+        let children = Set(ProcessControl.children(of: pid))
+        if let cached = mappings[pid], cached.children == children,
+           Date().timeIntervalSince(cached.at) < maxAge ?? mappingMaxAge { return cached.mapping }
+        if let running = mappingRequests[pid] { return await running.value }
+        let request = Task.detached(priority: .utility) { await WindowGroups.mapping(for: app) }
+        mappingRequests[pid] = request
+        let mapping = await request.value
+        mappingRequests[pid] = nil
+        mappings[pid] = CachedMapping(mapping: mapping, at: Date(), children: children)
+        return mapping
+    }
+
+    /// Starts a background fetch if the cached mapping is stale, then rearms the app's window
+    /// timers and refreshes. Not for a frozen app: `--status` would wait for it until timeout.
+    private func updateMapping(for app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        guard mappingRequests[pid] == nil, !isFrozenWhole(pid) else { return }
+        if let cached = mappings[pid], Date().timeIntervalSince(cached.at) < mappingMaxAge,
+           cached.children == Set(ProcessControl.children(of: pid)) { return }
+        Task { @MainActor in
+            _ = await mapping(for: app)
+            if usesWindowAutoPause(app) { scheduleWindowTimers(pid, app: app) }
+            refresh()
+        }
+    }
+
+    // MARK: - Window freeze
+
+    private func isFrozenWhole(_ pid: pid_t) -> Bool {
+        ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid)
+    }
+
+    private func windowRecordPids(_ owner: pid_t) -> [pid_t] {
+        PausedStore.shared.windowRecords(owner: owner).map(\.pid)
+    }
+
+    private func isWindowFrozen(_ key: WindowKey) -> Bool {
+        PausedStore.shared.windowRecords(owner: key.pid).contains { $0.windowId == key.window }
+    }
+
+    /// The AX title of the group's window when exactly one window carries the mapping's title.
+    private func exactAXTitle(of group: WindowGroup, pid: pid_t) -> String? {
+        guard let title = group.title else { return nil }
+        let wanted = WindowGroups.normalizedSegments(title)
+        let hits = Accessibility.windowTitles(pid: pid).filter { WindowGroups.normalizedSegments($0) == wanted }
+        return hits.count == 1 ? hits[0] : nil
+    }
+
+    /// The window's group and its current AX title, read before a freeze: a frozen renderer
+    /// cannot retitle its window, so this is the title a later focus or click reports. A
+    /// mapping title that matches no window is stale (the active editor changed), so the
+    /// mapping is fetched again first.
+    private func windowToFreeze(app: NSRunningApplication, id: Int) async -> (group: WindowGroup, mapping: WindowMapping, title: String?)? {
+        let pid = app.processIdentifier
+        guard var mapping = await mapping(for: app),
+              var group = mapping.groups.first(where: { $0.id == id }) else { return nil }
+        var title = exactAXTitle(of: group, pid: pid)
+        if title == nil, let fresh = await self.mapping(for: app, maxAge: 2),
+           let freshGroup = fresh.groups.first(where: { $0.id == id }) {
+            mapping = fresh
+            group = freshGroup
+            title = exactAXTitle(of: group, pid: pid)
+        }
+        return (group, mapping, title)
+    }
+
+    func pauseWindow(_ entry: AppEntry, window: Int) async {
+        guard let app = runningApp(for: entry),
+              let target = await windowToFreeze(app: app, id: window),
+              !isWindowFrozen(WindowKey(pid: app.processIdentifier, window: window)) else { return }
+        freezeWindow(app: app, group: target.group, mapping: target.mapping, title: target.title)
+    }
+
+    /// Freezes each root of the group with its tree. Shared processes and the app itself are
+    /// never roots; `pauseTree` keeps its own guard against freezing this process. A frozen app
+    /// is left alone: its windows resume with it.
+    private func freezeWindow(app: NSRunningApplication, group: WindowGroup, mapping: WindowMapping, title: String?) {
+        let appPid = app.processIdentifier
+        guard !isFrozenWhole(appPid) else { return }
+        let shared = Set(mapping.shared).union([appPid])
+        let children = Set(ProcessControl.children(of: appPid))
+        for role in ["renderer", "extension host", "file watcher"] {
+            guard let root = group.anchors[role], !shared.contains(root), children.contains(root),
+                  let start = ProcessControl.startTime(of: root),
+                  ProcessControl.pauseTree(root: root) else { continue }
+            PausedStore.shared.add(PausedRecord(
+                pid: root, bundleID: app.bundleIdentifier, name: app.localizedName ?? "Unknown",
+                launchDate: start, ownerPid: appPid, windowId: group.id, windowTitle: title ?? group.title))
+        }
+        windowTimers.removeValue(forKey: WindowKey(pid: appPid, window: group.id))?.invalidate()
+        refresh()
+    }
+
+    func resumeWindow(_ entry: AppEntry, window: Int) {
+        guard let pid = entry.pid else { return }
+        resumeWindow(WindowKey(pid: pid, window: window))
+    }
+
+    private func resumeWindow(_ key: WindowKey) {
+        for rec in PausedStore.shared.windowRecords(owner: key.pid) where rec.windowId == key.window {
+            if rec.isLive { ProcessControl.resumeTree(root: rec.pid) }
+            PausedStore.shared.remove(pid: rec.pid)
+        }
+        windowIdleSince[key] = Date()
+        scheduleWindowTimer(key)
+        refresh()
+    }
+
+    private func resumeWindows(of pid: pid_t) {
+        for id in Set(PausedStore.shared.windowRecords(owner: pid).compactMap(\.windowId)) {
+            resumeWindow(WindowKey(pid: pid, window: id))
+        }
+    }
+
+    private func resumeAllWindows() {
+        for owner in Set(PausedStore.shared.records.compactMap(\.ownerPid)) { resumeWindows(of: owner) }
+    }
+
+    // MARK: - Quit with frozen windows
+
+    /// An app quitting with a frozen window hangs: it waits for that renderer's unload reply.
+    /// There is no notification for another app starting to quit, but its other renderers exit
+    /// at once, so the exit of any unfrozen renderer thaws the app's frozen windows. A window
+    /// closed normally does the same, which costs one re-idle.
+    private func syncExitWatchers() {
+        var wanted: [pid_t: pid_t] = [:]
+        for owner in Set(PausedStore.shared.records.compactMap(\.ownerPid)) {
+            let frozen = Set(windowRecordPids(owner))
+            for p in AppProcesses.list(appPid: owner)
+            where p.ppid == owner && p.role == "renderer" && !frozen.contains(p.pid) {
+                wanted[p.pid] = owner
+            }
+        }
+        for (pid, source) in exitWatchers where wanted[pid] == nil {
+            source.cancel()
+            exitWatchers[pid] = nil
+        }
+        for (pid, owner) in wanted where exitWatchers[pid] == nil {
+            let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+            source.setEventHandler { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.exitWatchers.removeValue(forKey: pid)?.cancel()
+                    self.resumeWindows(of: owner)
+                }
+            }
+            source.resume()
+            exitWatchers[pid] = source
+        }
+    }
+
+    /// Mouse-down: a click into a window that was frozen while focused moves no focus, so the
+    /// clicked window is found by hit test. Key-down: Cmd-Q of a single-window app, where no
+    /// other renderer exits to report the quit.
+    private func syncEventMonitor() {
+        let wanted = frozenWindowCount > 0 && Accessibility.isTrusted
+        if wanted, eventMonitor == nil {
+            eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .keyDown]) { [weak self] event in
+                MainActor.assumeIsolated { self?.globalEvent(event) }
+            }
+        } else if !wanted, let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+    }
+
+    private func globalEvent(_ event: NSEvent) {
+        guard let pid = frontPid, !windowRecordPids(pid).isEmpty, !isFrozenWhole(pid) else { return }
+        if event.type == .keyDown {
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+               event.charactersIgnoringModifiers?.lowercased() == "q" { resumeWindows(of: pid) }
+            return
+        }
+        // AX uses top-left screen coordinates, AppKit bottom-left of the primary screen.
+        let location = NSEvent.mouseLocation
+        let height = NSScreen.screens.first?.frame.height ?? 0
+        if let title = Accessibility.windowTitle(at: CGPoint(x: location.x, y: height - location.y), pid: pid) {
+            noteFocus(pid: pid, title: title)
+        }
+    }
+
+    // MARK: - Window focus
+
+    /// Observes window focus of apps with frozen windows (to thaw the one clicked into) and of
+    /// apps with per-window auto-pause (for their idle clocks). Needs Accessibility. Never for
+    /// a stopped app: AX calls to it block until they time out.
+    private func syncFocusObservers() {
+        let trusted = Accessibility.isTrusted
+        if trusted != wasTrusted { focusObserverFailed = [:] }
+        wasTrusted = trusted
+        var wanted = Set(PausedStore.shared.records.compactMap(\.ownerPid))
+        for app in listedApps() where usesWindowAutoPause(app) { wanted.insert(app.processIdentifier) }
+        wanted = wanted.filter { !ProcessControl.isStopped($0) }
+        for pid in focusObservers.keys where !wanted.contains(pid) { focusObservers[pid] = nil }
+        focusObserverFailed = focusObserverFailed.filter { wanted.contains($0.key) && Date().timeIntervalSince($0.value) < 60 }
+        guard trusted else { return }
+        for pid in wanted where focusObservers[pid] == nil && focusObserverFailed[pid] == nil {
+            focusObservers[pid] = WindowFocusObserver(pid: pid) { [weak self] title in
+                self?.noteFocus(pid: pid, title: title)
+            }
+            if focusObservers[pid] == nil {
+                focusObserverFailed[pid] = Date()
+            } else if frontPid == pid {
+                noteFocus(pid: pid, title: Accessibility.focusedWindowTitle(pid: pid))
+            }
+        }
+    }
+
+    /// Focus moved to the window titled `title`: it stops idling, the window it left starts,
+    /// and a frozen window is thawed.
+    private func noteFocus(pid: pid_t, title: String?) {
+        if frontPid == pid {
+            let groups = mappings[pid]?.mapping?.groups ?? []
+            let id = title.flatMap { WindowGroups.match(axTitle: $0, in: groups)?.id }
+            if let old = focusedWindow[pid], old != id {
+                let key = WindowKey(pid: pid, window: old)
+                windowIdleSince[key] = Date()
+                focusedWindow[pid] = id
+                scheduleWindowTimer(key)
+            }
+            focusedWindow[pid] = id
+            if let id { windowTimers.removeValue(forKey: WindowKey(pid: pid, window: id))?.invalidate() }
+            // A new window, or titles changed since the mapping was fetched.
+            if id == nil, title != nil, let app = NSRunningApplication(processIdentifier: pid) { updateMapping(for: app) }
+        }
+        let records = PausedStore.shared.windowRecords(owner: pid)
+        guard let title, !records.isEmpty else { return }
+        // A new window opens with focus; its renderer needs an exit watcher.
+        syncExitWatchers()
+        let frozen = Dictionary(grouping: records.filter { $0.windowId != nil }, by: { $0.windowId! }).map { id, recs in
+            WindowGroup(id: id, title: recs.first?.windowTitle, anchors: [:], pids: Set(recs.map(\.pid)))
+        }
+        if let group = WindowGroups.match(axTitle: title, in: frozen) {
+            resumeWindow(WindowKey(pid: pid, window: group.id))
+            return
+        }
+        // A record without the exact AX title (made from a mapping title): place the window
+        // through the mapping and compare ids, fetching it again only for a title the cached
+        // one does not place, since clicks land here too.
+        if let known = mappings[pid]?.mapping.flatMap({ WindowGroups.match(axTitle: title, in: $0.groups) }) {
+            let key = WindowKey(pid: pid, window: known.id)
+            if isWindowFrozen(key) { resumeWindow(key) }
+            return
+        }
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        Task { @MainActor in
+            guard let mapping = await mapping(for: app, maxAge: 5),
+                  let group = WindowGroups.match(axTitle: title, in: mapping.groups) else { return }
+            let key = WindowKey(pid: pid, window: group.id)
+            if isWindowFrozen(key) { resumeWindow(key) }
+        }
+    }
+
+    // MARK: - Per-window auto-pause
+
+    /// A mapped app with auto-pause on idles and freezes per window and is never auto-frozen
+    /// whole. Without Accessibility the focused window is unknown, so it falls back to the
+    /// whole app.
+    private func usesWindowAutoPause(_ app: NSRunningApplication) -> Bool {
+        AppSettingsStore.shared.settings(for: app.bundleIdentifier).autoPauseEnabled
+            && WindowGroups.isSupported(app) && Accessibility.isTrusted
+    }
+
+    private func cancelWindowTimers(_ pid: pid_t) {
+        for key in windowTimers.keys where key.pid == pid { windowTimers.removeValue(forKey: key)?.invalidate() }
+    }
+
+    /// Arms a timer per window of the cached mapping; without one, fetches it first.
+    private func scheduleWindowTimers(_ pid: pid_t, app: NSRunningApplication) {
+        guard let mapping = mappings[pid]?.mapping else {
+            cancelWindowTimers(pid)
+            updateMapping(for: app)
+            return
+        }
+        let ids = Set(mapping.groups.map(\.id))
+        for key in windowTimers.keys where key.pid == pid && !ids.contains(key.window) {
+            windowTimers.removeValue(forKey: key)?.invalidate()
+        }
+        windowIdleSince = windowIdleSince.filter { $0.key.pid != pid || ids.contains($0.key.window) }
+        for id in ids { scheduleWindowTimer(WindowKey(pid: pid, window: id), app: app) }
+    }
+
+    /// Arms the window's timer for `windowIdleSince + minutes`, or for `at` on a re-check.
+    /// Frozen windows, windows of a frozen app and the focused window of the frontmost app get
+    /// none.
+    private func scheduleWindowTimer(_ key: WindowKey, app: NSRunningApplication? = nil, at: Date? = nil) {
+        windowTimers.removeValue(forKey: key)?.invalidate()
+        guard let app = app ?? NSRunningApplication(processIdentifier: key.pid), !app.isTerminated,
+              usesWindowAutoPause(app), !isWindowFrozen(key), !isFrozenWhole(key.pid),
+              !(frontPid == key.pid && focusedWindow[key.pid] == key.window) else { return }
+        let since = windowIdleSince[key] ?? Date()
+        windowIdleSince[key] = since
+        let minutes = AppSettingsStore.shared.settings(for: app.bundleIdentifier).autoPauseMinutes
+        let due = at ?? since.addingTimeInterval(TimeInterval(minutes * 60))
+        let timer = Timer(fire: max(due, Date()), interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.windowAutoPauseFired(key) }
+        }
+        timer.tolerance = 5
+        RunLoop.main.add(timer, forMode: .common)
+        windowTimers[key] = timer
+    }
+
+    /// Freezes the window group unless it is the focused window of the frontmost app, is busy,
+    /// or a system blocker holds; then it is checked again later, as for whole apps.
+    private func windowAutoPauseFired(_ key: WindowKey) {
+        windowTimers[key] = nil
+        guard let app = NSRunningApplication(processIdentifier: key.pid), !app.isTerminated,
+              usesWindowAutoPause(app), !isFrozenWhole(key.pid) else { return }
+        let since = windowIdleSince[key]
+        let settings = busySettings
+        Task { @MainActor in
+            // Closed windows simply drop out.
+            guard let target = await windowToFreeze(app: app, id: key.window) else { return }
+            if frontPid == key.pid {
+                // A focused window that cannot be identified counts as this one.
+                let front = Accessibility.focusedWindowTitle(pid: key.pid)
+                    .flatMap { WindowGroups.match(axTitle: $0, in: target.mapping.groups) }
+                if front == nil || front?.id == key.window {
+                    scheduleWindowTimer(key, app: app, at: Date().addingTimeInterval(busyRetryInterval))
+                    return
+                }
+            }
+            let blockers = await busy.systemBlockers()
+            let findings = blockers.isEmpty
+                ? await busy.findings(pids: Array(target.group.pids), settings: settings, waitForCPU: false) : []
+            // Focus may have moved, or the window or app frozen, resumed or rescheduled meanwhile.
+            guard windowTimers[key] == nil, windowIdleSince[key] == since, !app.isTerminated,
+                  usesWindowAutoPause(app), !isWindowFrozen(key), !isFrozenWhole(key.pid),
+                  !(frontPid == key.pid && focusedWindow[key.pid] == key.window) else { return }
+            guard let findings else {
+                scheduleWindowTimer(key, app: app, at: Date().addingTimeInterval(cpuSampleRetryInterval))
+                return
+            }
+            if !blockers.isEmpty || !findings.isEmpty {
+                scheduleWindowTimer(key, app: app, at: Date().addingTimeInterval(busyRetryInterval))
+                return
+            }
+            freezeWindow(app: app, group: target.group, mapping: target.mapping, title: target.title)
+        }
     }
 }

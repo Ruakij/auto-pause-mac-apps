@@ -39,7 +39,10 @@ Everything that talks to the OS about processes. No UI, no state; pure functions
 | `memoryInfo(of:)` | One `proc_pid_rusage` call returning **both** `ri_resident_size` and `ri_phys_footprint` | The two numbers diverge enormously (Chrome: 275 MB vs 4.31 GB). Reporting only footprint made pausing look broken. |
 | `treeMemory(root:)` | Sums `MemoryInfo` across the tree | An app's real cost is the whole tree. |
 | `pauseTree(root:)` | `SIGSTOP` **parent first**, then descendants | Parent-first stops it spawning new children mid-freeze, which would escape the sweep. |
-| `resumeTree(root:)` | `SIGCONT` children first, parent last | Reverse order so the parent finds its children already alive. |
+| `resumeTree(root:keepStopped:)` | `SIGCONT` children first, parent last, skipping the subtrees in `keepStopped` | Reverse order so the parent finds its children already alive. Resuming a whole app leaves its separately frozen windows frozen. |
+| `children(of:)` | Direct children via `proc_listchildpids` | A VS Code window opening or closing changes the main process's children, which invalidates the cached window mapping. |
+| `cpuTimeNanos(of:)` | User + system CPU from `proc_pid_rusage`, mach ticks converted to ns | The one CPU sampler, shared by busy detection and the expanded rows. |
+| `startTime(of:)` | `pbi_start_tvsec`/`usec` from `PROC_PIDTBSDINFO` | Pairs a helper pid with its start time in window records, as `launchDate` does for apps. |
 | `isStopped(_:)` | Reads `pbi_status == SSTOP` | Ground truth. Detects apps frozen outside Pause, and survives Pause restarting. |
 | `treeContainsSelf(root:)` | Checks whether a tree contains this process, walking both descendants and our own ancestry | `pauseTree` refuses when true. Freezing ourselves is unrecoverable: the menu bar stops responding, so nothing can be resumed and everything frozen in the same sweep stays frozen. Enforced at the signal layer so it holds no matter what the caller asks for. |
 
@@ -108,6 +111,55 @@ normal save sheet and stay open; Pause reports `.refused` and leaves them merely
   still stopped; requests that go through the app itself (`NSRunningApplication.activate()`,
   `osascript ... activate`) produce no notification and are lost.
 
+- **Expanded rows** - `toggleExpanded(_:)`; on each refresh every expanded app gets an
+  `AppDetail`: its tree in tree order (`AppProcesses.list`) with resident memory and CPU % from
+  the delta to the previous refresh. With a window mapping or window records it is split into
+  `WindowDetail`s (live trees of each group's anchors) and the shared rest. A window frozen while
+  missing from the mapping is still listed from its records.
+- **Window mappings** - cached per app pid (`WindowGroups.mapping`, run in a detached task:
+  `code --status` takes seconds). Fetched again when the row is expanded, a window timer fires or
+  a focused window matches no group, if the cache is older than 30 s or the app's direct
+  children changed. Direct children rather than the whole tree: extension hosts spawn and reap
+  commands constantly, which would refetch on every refresh.
+- **Window freeze** - `pauseWindow` / `freezeWindow` run `pauseTree` on each anchor of the group
+  (renderer, extension host, file watcher) that is still a direct child of the app and not
+  shared, and record each as a window record. `resumeWindow` resumes the live ones and drops the
+  records. Before a freeze the app's AX window titles are read (the main process is not
+  frozen, so this is fast) and the one equal to the group's mapping title is stored as
+  `windowTitle`; when none is, the mapping is fetched again first (the manual Pause shows
+  "Checking..." meanwhile). A frozen renderer cannot retitle its window, so this is the title
+  any later focus or click reports. No window is frozen while its app is frozen whole. Resume
+  All and quit resume window records before app records (children first), and only records
+  whose pid still has the recorded start time. Deep Sleep first resumes the app's frozen
+  windows, which could not handle the quit.
+- **Quit with frozen windows** - an app with a frozen window cannot quit: its main process
+  waits for the frozen renderer's unload reply (observed with VS Code, single and multi
+  window). No public notification reports another app starting to quit, so: the unfrozen
+  renderers of such an app get a `DispatchSource` exit watcher (`syncExitWatchers`; in a quit
+  they exit within a second) and any exit resumes all the app's frozen windows; Cmd-Q while the
+  app is frontmost does the same (global key monitor); `willPowerOffNotification` resumes every
+  window record. Quitting a single-window app from its menu or the Dock is not detected.
+- **Window focus** - a `WindowFocusObserver` runs for every app with window records or
+  per-window auto-pause, when Accessibility is trusted. A focus change matched to a frozen
+  window (`WindowGroups.match` against the record titles) resumes it; a title that matches no
+  record is placed through the mapping (fetched again when the cached one does not place it)
+  and compared by window id. On activation the focused window is read once after 300 ms,
+  because a click into the window that was already focused changes no focus. While any window
+  is frozen a global mouse-down monitor hit-tests clicks in the frontmost app
+  (`AXUIElementCopyElementAtPosition`, window frames as fallback), for a click back into a
+  window frozen while it was focused. Thaw on activation leaves window records frozen
+  (`keepStopped`). No observer is created for a stopped app, AX calls time out after 0.25 s,
+  and a failed observer is retried only after 60 s, on app launch or quit, or when
+  Accessibility trust changes.
+- **Per-window auto-pause** - for VS Code-family apps with auto-pause on and Accessibility
+  trusted (`usesWindowAutoPause`); such apps are never auto-frozen whole. One one-shot timer per
+  window (`windowTimers`, same style as the app timers) at `windowIdleSince` + the app's
+  minutes. `windowIdleSince` is set when a window stops being the focused window of the
+  frontmost app (focus moves away, the app deactivates, the window is resumed) or when it is
+  first seen. On fire: fresh mapping, skip the focused window of the frontmost app (an
+  unidentifiable focused window counts as it), system blockers, busy findings over the group's
+  pids with the same 30 s and 60 s retries as apps, then `freezeWindow`. An app frozen whole
+  has no window timers: they are cancelled when it is paused and re-armed when it resumes.
 - **Three states** per entry: `.running`, `.paused` (SIGSTOP), `.sleeping` (quit, resumable).
 - **Apps only.** Entries come solely from `NSWorkspace.runningApplications` filtered to
   `.regular`, so daemons never enter the list.
@@ -164,7 +216,7 @@ All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable acro
 
 | File | Module | Purpose |
 |---|---|---|
-| `paused.json` | `PausedStore.swift` | Frozen apps. Guards against pid reuse by matching launch dates. If Pause is killed, frozen apps are still recognised on next launch. |
+| `paused.json` | `PausedStore.swift` | Frozen apps and window groups. A whole-app record has no `ownerPid`; a window record holds one group anchor with `ownerPid`, `windowId`, `windowTitle`, and the anchor's start time in `launchDate`. Pid reuse is guarded by launch date / start time. A window record whose anchor is no longer a child of its owner (the app quit) is resumed and dropped. New fields decode with defaults, so older files stay readable. If Pause is killed, frozen apps are still recognised on next launch. |
 | `slept.json` | `SleptStore.swift` | Deep-slept apps. **Essential** — a slept app is gone from `runningApplications`, so without this record it would disappear and be unrecoverable. |
 | `settings.json` | `AppSettingsStore.swift` | Per-app idle auto-pause (on/off, minutes), keyed by bundle ID. |
 
@@ -174,13 +226,14 @@ All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable acro
 
 | File | Role |
 |---|---|
-| `MenuView.swift` | The panel: ring gauge, system usage graph, and the list in two sections: SUSPENDED and APPS. A row's Pause and Deep Sleep buttons check the app for busy findings first; if busy, the memory line shows them and the clicked button turns into an orange Force for 5 s or until the pointer leaves the row (for Deep Sleep this comes before the first-time warning). The list gets an explicit height computed from the row and section counts, capped at the screen height (a `ScrollView` has no intrinsic size, so without an explicit height the window collapses; computing rather than measuring keeps the size stable across refreshes). |
+| `AppProcesses.swift`, `WindowGroups.swift`, `WindowFocusObserver.swift` | Process tree with role labels; VS Code window mapping (`code --status`, env/fd fallback) and AX title matching; Accessibility trust, prompt, settings link and the focus observer. |
+| `MenuView.swift` | The panel: ring gauge, system usage graph, and the list in two sections: SUSPENDED and APPS. A row's Pause and Deep Sleep buttons check the app for busy findings first; if busy, the memory line shows them and the clicked button turns into an orange Force for 5 s or until the pointer leaves the row (for Deep Sleep this comes before the first-time warning). The list gets an explicit height computed from the row and section counts, capped at the screen height (a `ScrollView` has no intrinsic size, so without an explicit height the window collapses; computing rather than measuring keeps the size stable across refreshes; expanded rows add their line count times a fixed line height). Each row has a chevron that expands it into its processes, or into window sections with Pause/Resume (through their own `BusyGate` over the window's pids; disabled with a tooltip without Accessibility) and a Shared section. Settings shows the Accessibility state with a button to System Settings. |
 | `DetailViews.swift` | `SparklineView`, `UsageAreaChart` (plotted against total RAM so normal fluctuation looks normal, not like a mountain range), and the per-app detail popover with auto-pause settings. |
 | `SystemDetailView.swift` | Ring gauge, usage history, App/Wired/Compressed/Free/Swap breakdown, top processes. |
 | `ReclaimView.swift` | Free Up Memory: a reviewable checklist of what will be paused, with running totals, before anything happens. Busy apps (checked in one pass on open; the confirm button waits for it) start unticked with the reason as subtitle, and are never remembered as opt-outs. Recording and call apps start unticked. Opt-outs can be remembered. |
 | `BusySettingsView.swift` | Settings > Busy apps, a page inside the Settings popover: one checkbox per condition, CPU threshold, and the editable regex list (invalid entries are marked and not saved). |
 | `DeepSleepWarningView.swift` | First-run warning: explains Deep Sleep actually quits the app, reports that app's restore status, offers to enable window restore. |
-| `PauseApp.swift` | `MenuBarExtra` host plus the `NSApplicationDelegate`. Presents the first-run walkthrough in a real `NSWindow` (an `LSUIElement` app isn't activated by default, so it calls `NSApp.activate` explicitly), and resumes every frozen app on quit so nothing is ever stranded. |
+| `PauseApp.swift` | `MenuBarExtra` host plus the `NSApplicationDelegate`. Presents the first-run walkthrough in a real `NSWindow` (an `LSUIElement` app isn't activated by default, so it calls `NSApp.activate` explicitly), and resumes every frozen app and window on quit so nothing is ever stranded. Asks for Accessibility at launch when not trusted (the system shows its prompt at most once). |
 | `OnboardingView.swift` | Four-page animated walkthrough: welcome, the two tiers, Free Up Memory, and where to find the app + start-at-login. Exists because a menu-bar-only app with no Dock icon is easy to lose immediately after installing. |
 | `LaunchAtLogin.swift` | `SMAppService.mainApp` wrapper. Registration is idempotent (registering when already enabled throws), and the status is read back afterwards — `register()` can succeed while the item still needs approval, or not take effect when the app runs from a DMG or build folder. |
 

@@ -20,7 +20,7 @@ enum ProcessControl {
     }
 
     /// Direct children of a pid via proc_listchildpids, growing the buffer as needed.
-    private static func children(of pid: pid_t) -> [pid_t] {
+    static func children(of pid: pid_t) -> [pid_t] {
         var capacity = 64
         while true {
             var buf = [pid_t](repeating: 0, count: capacity)
@@ -64,6 +64,34 @@ enum ProcessControl {
             acc.resident += m.resident
             acc.footprint += m.footprint
         }
+    }
+
+    /// User + system CPU time in nanoseconds; diff two samples for a CPU percentage.
+    static func cpuTimeNanos(of pid: pid_t) -> UInt64? {
+        var info = rusage_info_current()
+        let ok = withUnsafeMutablePointer(to: &info) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
+            }
+        }
+        guard ok == 0 else { return nil }
+        // ri_*_time are mach ticks, not ns (41.67 ns per tick on Apple silicon).
+        let ticks = info.ri_user_time + info.ri_system_time
+        return ticksToNanos.denom.dividingFullWidth(ticks.multipliedFullWidth(by: ticksToNanos.numer)).quotient
+    }
+
+    private static let ticksToNanos: (numer: UInt64, denom: UInt64) = {
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        return (UInt64(tb.numer), UInt64(tb.denom))
+    }()
+
+    /// Start time of the process; with the pid it identifies a process across pid reuse.
+    static func startTime(of pid: pid_t) -> Date? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return Date(timeIntervalSince1970: Double(info.pbi_start_tvsec) + Double(info.pbi_start_tvusec) / 1_000_000)
     }
 
     /// True if the process is currently stopped (SIGSTOP'd), via BSD process status.
@@ -119,11 +147,13 @@ enum ProcessControl {
         return false
     }
 
-    /// Resume the whole tree. Children first, parent last.
+    /// Resume the whole tree except the subtrees rooted at `keepStopped`. Children first,
+    /// parent last.
     @discardableResult
-    static func resumeTree(root: pid_t) -> Bool {
+    static func resumeTree(root: pid_t, keepStopped: [pid_t] = []) -> Bool {
         let tree = processTree(root: root)
-        for pid in tree.reversed() where pid != root {
+        let kept = Set(keepStopped.filter { $0 != root }.flatMap { processTree(root: $0) })
+        for pid in tree.reversed() where pid != root && !kept.contains(pid) {
             kill(pid, SIGCONT)
         }
         return kill(root, SIGCONT) == 0

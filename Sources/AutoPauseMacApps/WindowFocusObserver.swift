@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Foundation
 
@@ -10,6 +11,10 @@ enum Accessibility {
     static func requestTrust() -> Bool {
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         return AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+    }
+
+    static func openSettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
     /// Titles of the app's windows, in AX order.
@@ -29,16 +34,45 @@ enum Accessibility {
     }
 
     static func title(of window: AXUIElement) -> String? {
+        AXUIElementSetMessagingTimeout(window, 0.25)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &value) == .success else { return nil }
         return value as? String
+    }
+
+    /// Title of the app's window at a point in top-left screen coordinates. Falls back to
+    /// window frames when the hit test fails: the main process answers for frames, while a
+    /// hit test into web content may need the (frozen) renderer.
+    static func windowTitle(at point: CGPoint, pid: pid_t) -> String? {
+        let app = element(pid: pid)
+        var hit: AXUIElement?
+        var value: CFTypeRef?
+        if AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit) == .success, let hit,
+           AXUIElementCopyAttributeValue(hit, kAXWindowAttribute as CFString, &value) == .success, let value {
+            let window = value as! AXUIElement
+            if let title = title(of: window) { return title }
+        }
+        // Front to back, so the first window containing the point is the one on top.
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return nil }
+        return windows.first { frame(of: $0)?.contains(point) == true }.flatMap(title(of:))
+    }
+
+    static func frame(of window: AXUIElement) -> CGRect? {
+        var pos: CFTypeRef?, size: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &pos) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &size) == .success else { return nil }
+        var origin = CGPoint.zero, extent = CGSize.zero
+        guard AXValueGetValue(pos as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(size as! AXValue, .cgSize, &extent) else { return nil }
+        return CGRect(origin: origin, size: extent)
     }
 
     /// AX calls block until the target answers; a short timeout keeps a hung or frozen app
     /// from stalling the main thread for the default 6 s.
     static func element(pid: pid_t) -> AXUIElement {
         let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 1)
+        AXUIElementSetMessagingTimeout(app, 0.25)
         return app
     }
 }
