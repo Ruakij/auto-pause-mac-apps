@@ -143,12 +143,26 @@ struct MenuView: View {
                 ReclaimView(model: model) { showReclaim = false }
             }
             Spacer()
+            let resumable = model.entries.filter { $0.state == .paused }.count + model.frozenWindowCount
             Button {
                 model.resumeAll()
             } label: {
-                Label("Resume All", systemImage: "play.circle")
+                ViewThatFits(in: .horizontal) {
+                    Label(resumable > 0 ? "Resume All (\(resumable))" : "Resume All", systemImage: "play.circle")
+                    Label("Resume All", systemImage: "play.circle")
+                }
             }
-            .disabled(model.pausedCount + model.frozenWindowCount == 0)
+            .disabled(resumable == 0)
+            let sleeping = model.entries.filter { $0.state == .sleeping }.count
+            if sleeping > 0 {
+                Spacer()
+                Button {
+                    model.wakeAll()
+                } label: {
+                    Label("Wake all (\(sleeping))", systemImage: "sunrise")
+                }
+                .help("Relaunch every deep-slept app")
+            }
             Spacer()
             Button {
                 showSettings = true

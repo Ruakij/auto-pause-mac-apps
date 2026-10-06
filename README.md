@@ -56,7 +56,8 @@ Two sections:
 - **Apps** — running apps sorted by the RAM they actually hold, each with a live sparkline and
   buttons to Pause (⏸), Deep Sleep (🌙) or open details.
 
-The footer holds **Free Up Memory**, **Resume All**, settings and quit.
+The footer holds **Free Up Memory**, **Resume All** (paused apps and windows), **Wake all**
+(relaunches deep-slept apps, shown only while there are any), settings and quit.
 
 Look at the frozen **Mail** row: `9.5 MB` resident against `399.9 MB` footprint. Mail is holding
 9.5 MB of real RAM — the other ~390 MB has already been compressed or swapped out. That gap is

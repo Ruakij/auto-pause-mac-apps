@@ -728,12 +728,17 @@ final class AppListModel: ObservableObject {
             }
         }
         rescheduleAutoPause()
+        refresh()
+    }
+
+    /// Relaunches every deep-slept app. Kept apart from `resumeAll`: a relaunch is slow,
+    /// brings windows to the front and takes back the memory Deep Sleep freed.
+    func wakeAll() {
         let sleeping = SleptStore.shared.records
         Task { @MainActor in
             for rec in sleeping { _ = await DeepSleepController.wake(rec) }
             refresh()
         }
-        refresh()
     }
 
     // MARK: - Process lists
