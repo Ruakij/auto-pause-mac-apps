@@ -271,7 +271,7 @@ final class BusyDetector {
         return taps.prefix(Int(count)).compactMap { tap in
             guard tap.enabled, tap.options != .listenOnly,
                   pids.contains(tap.tappingProcess), seen.insert(tap.tappingProcess).inserted else { return nil }
-            return BusyFinding(condition: .inputTap, pid: tap.tappingProcess, detail: "intercepts keyboard/mouse input")
+            return BusyFinding(condition: .inputTap, pid: tap.tappingProcess, detail: "handles shortcuts or mouse gestures")
         }
     }
 

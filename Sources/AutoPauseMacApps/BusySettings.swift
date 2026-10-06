@@ -17,7 +17,7 @@ enum BusyCondition: String, CaseIterable, Codable {
         case .powerAssertion: return "Keeping the Mac awake"
         case .debugger: return "Debugger attached"
         case .devices: return "Serial ports, disks, input devices"
-        case .inputTap: return "Intercepting keyboard or mouse"
+        case .inputTap: return "Handles shortcuts or mouse gestures"
         case .processes: return "Running commands (list below)"
         }
     }
