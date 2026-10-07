@@ -326,7 +326,7 @@ however it was frozen.
 
 An app counts as busy when anything in its process tree is:
 
-- computing (CPU above a threshold, 0.5 % of one core by default),
+- computing (CPU above a threshold, 10 % of one core by default),
 - playing or recording sound,
 - keeping the Mac awake (video playback, downloads, `caffeinate`),
 - being debugged,
@@ -344,8 +344,7 @@ idle (*"Idle 12 min"*, plus
 line, or the idle line. CPU figures come from the same samples the CPU condition judges, so a
 row never shows a figure that disagrees with its "Busy: CPU" reason; they are measured for every
 running app, never-freeze apps included, also while the CPU condition is switched off. The CPU
-graphs use a logarithmic scale from 0.1 % to 100 % of one core (higher when an app uses more),
-so a low threshold stays visible. Nothing is sampled for any of this while the panel is closed.
+graphs run from 0 to 100 % of one core (higher when an app uses more). Nothing is sampled for any of this while the panel is closed.
 
 Busy apps are never auto-paused. On a row shown busy, Pause and Deep Sleep carry a small
 hourglass, and their tooltip says a second click is needed. Clicking one shows what is

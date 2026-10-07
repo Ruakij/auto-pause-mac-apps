@@ -27,7 +27,7 @@ enum BusyCondition: String, CaseIterable, Codable {
 struct BusySettings: Equatable {
     var enabled: Set<BusyCondition> = Set(BusyCondition.allCases)
     /// Percent of one core, summed over the app tree, averaged since the previous sample.
-    var cpuThresholdPercent: Double = 0.5
+    var cpuThresholdPercent: Double = 10
     /// Regexes matched against each process's full command line (argv joined by spaces).
     var patterns: [String] = BusySettings.defaultPatterns
 

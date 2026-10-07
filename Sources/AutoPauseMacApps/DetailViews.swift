@@ -30,10 +30,9 @@ struct SparklineView: View {
     }
 }
 
-/// CPU history of one app, on a log scale from 0.1 % (the row's display floor) up to
-/// max(100 %, peak): the busy threshold (0.5 % by default) lands about a quarter up instead of
-/// on the bottom edge, and a full core still reaches the top. With `threshold`, a dashed line
-/// marks the CPU busy condition.
+/// CPU history of one app from 0 to max(100 %, peak), so an app idling at 0.3 % stays a flat
+/// line instead of filling the graph. With `threshold`, a dashed line marks the CPU busy
+/// condition.
 struct CPUSparklineView: View {
     let history: [Double]
     var threshold: Double?
@@ -41,15 +40,11 @@ struct CPUSparklineView: View {
     var lineWidth: CGFloat = 1.5
     var fill = true
 
-    private static let floor = 0.1
-
     var body: some View {
         Canvas { context, size in
             guard history.count > 1 else { return }
-            let ceiling = log10(max(100, history.max() ?? 0) / Self.floor)
-            func y(_ v: Double) -> CGFloat {
-                size.height * (1 - CGFloat(log10(max(v, Self.floor) / Self.floor) / ceiling))
-            }
+            let ceiling = max(100, history.max() ?? 0)
+            func y(_ v: Double) -> CGFloat { size.height * (1 - CGFloat(v / ceiling)) }
 
             if let threshold {
                 var mark = Path()
