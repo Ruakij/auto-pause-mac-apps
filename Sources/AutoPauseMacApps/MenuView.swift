@@ -243,7 +243,17 @@ struct MenuView: View {
             + 12 // VStack padding
         let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
         let chromeHeight: CGFloat = 210 // header + usage graph + divider + footer + padding
+            + noticeHeight
         return min(contentHeight, max(200, screenHeight - chromeHeight))
+    }
+
+    /// The notice bar wraps, so its height follows the text: caption2 lines of about 14 pt,
+    /// roughly 55 characters each in the width left by the icon and the close button, plus
+    /// padding and divider.
+    private var noticeHeight: CGFloat {
+        guard let text = model.notice?.text else { return 0 }
+        let lines = max(1, (text.count + 54) / 55)
+        return CGFloat(lines) * 14 + 13
     }
 
     static func fmt(_ bytes: UInt64) -> String {
