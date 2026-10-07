@@ -311,12 +311,12 @@ private struct AppRow: View {
                 }
             }
 
+            Spacer(minLength: 4)
+
             if entry.history.count > 1 {
                 SparklineView(history: entry.history, color: entry.state == .running ? .blue : .gray)
                     .frame(width: 44, height: 20)
             }
-
-            Spacer(minLength: 4)
 
             if entry.state != .sleeping {
                 Button { showDetail = true } label: {
