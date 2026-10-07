@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Settings > Never Freeze: apps that nothing freezes, with no Force (Deep Sleep stays
+/// Settings > Never Freeze: apps that nothing freezes, with no Force (manual Deep Sleep stays
 /// available).
 struct NeverFreezeSettingsView: View {
     @ObservedObject var model: AppListModel
@@ -10,7 +10,7 @@ struct NeverFreezeSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("These apps are never paused: not automatically, not by Free Up Memory and not by hand, and there is no Force. Deep Sleep stays available.")
+            Text("These apps are never paused: not automatically, not by Free Up Memory and not by hand, and there is no Force. Deep Sleep quits them normally, only when chosen by hand.")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 

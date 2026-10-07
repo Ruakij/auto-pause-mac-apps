@@ -344,12 +344,12 @@ saved). All checks use public APIs and need no permission.
 ### Never freeze
 
 Some apps break the Mac when frozen. Apps on the **Never freeze** list are never paused: not
-automatically, not by Free Up Memory and not by hand, and there is no Force.
+automatically, not by Free Up Memory and not by hand, and there is no Force. Deep Sleep quits
+them normally, only when chosen by hand.
 Their row shows a lock icon instead of Pause and no busy or idle state. They have no auto-pause:
 no timer, no "Auto-pause..." menu item, and the details popover reads "On the Never freeze list"
 instead of the auto-pause settings. An auto-pause setting made before the app was added is kept
-and applies again once the app is removed from the list. Deep Sleep (a normal quit)
-stays available. The defaults: Finder, System Settings, Screen Sharing, Activity Monitor,
+and applies again once the app is removed from the list. The defaults: Finder, System Settings, Screen Sharing, Activity Monitor,
 Passwords, 1Password, Bitwarden, KeePassXC, GlobalProtect, Tunnelblick, WireGuard, UTM, Docker
 Desktop, Parallels Desktop and VMware Fusion. **Settings > Never Freeze** lists them with name
 and icon, removes entries, adds any listed app and restores the defaults. Removing an app from

@@ -340,7 +340,9 @@ private struct AppRow: View {
 
             if entry.canDeepSleep {
                 GatedButton(gate: gate, action: .deepSleep,
-                            help: "Deep Sleep \(entry.name): quit it and free all its memory, relaunch on Wake",
+                            help: entry.neverFreeze
+                                ? "Deep Sleep \(entry.name): quit it normally (it is never paused), relaunch on Wake"
+                                : "Deep Sleep \(entry.name): quit it and free all its memory, relaunch on Wake",
                             voiceOver: "Deep Sleep \(entry.name)", perform: deepSleepTapped) {
                     Image(systemName: "moon.zzz.fill")
                         .font(.system(size: 16))
@@ -376,8 +378,8 @@ private struct AppRow: View {
                     .font(.system(size: 15))
                     .foregroundStyle(.secondary)
                     .frame(width: 20)
-                    .help("On the Never freeze list")
-                    .accessibilityLabel("\(entry.name) is on the Never freeze list")
+                    .help("On the Never freeze list: never paused. Deep Sleep quits it normally.")
+                    .accessibilityLabel("\(entry.name) is on the Never freeze list: never paused. Deep Sleep quits it normally.")
             } else {
                 GatedButton(gate: gate, action: .pause, help: inUse ? inUseHelp : actionHelp,
                             voiceOver: "\(entry.state == .running ? "Pause" : "Resume") \(entry.name)",
