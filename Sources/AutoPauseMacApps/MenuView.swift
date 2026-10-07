@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuView: View {
     @ObservedObject var model: AppListModel
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.dismiss) private var dismiss
     @State private var showSystemDetail = false
     @State private var showReclaim = false
     /// Row order frozen while the pointer is in the list, so a row that changes state does not
@@ -198,6 +199,11 @@ struct MenuView: View {
             }
             Spacer()
             Button {
+                // Activating the app below keeps the panel key, so nothing else would close it.
+                // dismiss is not reliable for MenuBarExtra windows; closing the key window (the
+                // panel while it is open) covers that.
+                dismiss()
+                NSApp.keyWindow?.close()
                 openSettings()
                 // An LSUIElement app is not active, so its Settings window would open behind
                 // the frontmost app.
