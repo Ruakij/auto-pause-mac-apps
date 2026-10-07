@@ -340,7 +340,7 @@ private struct AppRow: View {
             }
 
             if entry.canDeepSleep {
-                GatedButton(gate: gate, action: .deepSleep,
+                GatedButton(gate: gate, action: .deepSleep, busy: shownBusy && entry.state == .running,
                             help: entry.neverFreeze
                                 ? "Deep Sleep \(entry.name): quit it normally (it is never paused), relaunch on Wake"
                                 : "Deep Sleep \(entry.name): quit it and free all its memory, relaunch on Wake",
@@ -382,7 +382,8 @@ private struct AppRow: View {
                     .help("On the Never freeze list: never paused. Deep Sleep quits it normally.")
                     .accessibilityLabel("\(entry.name) is on the Never freeze list: never paused. Deep Sleep quits it normally.")
             } else {
-                GatedButton(gate: gate, action: .pause, help: inUse ? inUseHelp : actionHelp,
+                GatedButton(gate: gate, action: .pause, busy: shownBusy && entry.state == .running,
+                            help: inUse ? inUseHelp : actionHelp,
                             voiceOver: "\(entry.state == .running ? "Pause" : "Resume") \(entry.name)",
                             perform: mainAction) {
                     Image(systemName: entry.state == .running ? "pause.circle.fill" : "play.circle.fill")
@@ -551,10 +552,13 @@ private func liveStateLine(gateText: String?, state: LiveState?) -> some View {
 }
 
 /// A Pause or Deep Sleep button that turns into Force while `gate` is armed for its action,
-/// the same in app rows and the detail popover.
+/// the same in app rows and the detail popover. A button of an app shown busy carries an
+/// hourglass badge before the first click, since that click only arms Force.
 struct GatedButton<Content: View>: View {
     @ObservedObject var gate: BusyGate
     let action: BusyGate.Action
+    /// Shown busy and running; a stale state of a just-paused pid must not mark Resume.
+    var busy = false
     let help: String
     let voiceOver: String
     let perform: () -> Void
@@ -571,14 +575,23 @@ struct GatedButton<Content: View>: View {
                     .padding(.vertical, 2)
                     .background(Color.orange, in: Capsule())
                     .foregroundStyle(.white)
+            } else if busy {
+                label().overlay(alignment: .bottomTrailing) {
+                    Image(systemName: "hourglass")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 label()
             }
         }
         .buttonStyle(.plain)
-        .help(armed ? "\(gate.text ?? "Busy"). Click again to proceed anyway." : help)
-        .accessibilityLabel(armed ? "Force: \(voiceOver)" : voiceOver)
+        .help(armed ? "\(gate.text ?? "Busy"). Click again to proceed anyway."
+              : busy ? "\(help). Busy: click twice to \(verb) anyway." : help)
+        .accessibilityLabel(armed ? "Force: \(voiceOver)" : busy ? "\(voiceOver), busy: activate twice to \(verb) anyway" : voiceOver)
     }
+
+    private var verb: String { action == .pause ? "pause" : "deep sleep" }
 }
 
 /// The busy step before a manual Pause or Deep Sleep, shared by the row and the detail popover.
@@ -586,9 +599,10 @@ struct GatedButton<Content: View>: View {
 final class BusyGate: ObservableObject {
     enum Action { case pause, deepSleep }
 
-    /// The button armed as Force, and the findings text shown meanwhile.
+    /// The button armed as Force, and the busy reasons shown meanwhile.
     @Published private(set) var armed: Action?
-    @Published private(set) var text: String?
+    @Published private(set) var reasons: [String]?
+    var text: String? { reasons.map { "Busy: " + $0.joined(separator: ", ") } }
     /// A check or an async `proceed` is running.
     @Published private(set) var checking = false
     /// Bumped by `clear()`, so a check that finishes after the pointer left or after a reset
@@ -610,7 +624,7 @@ final class BusyGate: ObservableObject {
         guard !checking else { return }
         let forced = armed == action
         clear()
-        if !forced, let shown, !shown.busy.isEmpty { return arm(action, text: shown.busyText) }
+        if !forced, let shown, !shown.busy.isEmpty { return arm(action, reasons: shown.busy) }
         checking = true
         let started = generation
         Task { @MainActor in
@@ -619,12 +633,12 @@ final class BusyGate: ObservableObject {
             let findings = await check()
             guard started == generation else { return }
             guard !findings.isEmpty else { return await proceed() }
-            arm(action, text: "Busy: " + findings.summary)
+            arm(action, reasons: findings.details)
         }
     }
 
-    private func arm(_ action: Action, text: String) {
-        self.text = text
+    private func arm(_ action: Action, reasons: [String]) {
+        self.reasons = reasons
         armed = action
         reset = Task { @MainActor in
             try? await Task.sleep(for: .seconds(5))
@@ -637,7 +651,7 @@ final class BusyGate: ObservableObject {
         reset?.cancel()
         reset = nil
         armed = nil
-        text = nil
+        reasons = nil
     }
 }
 

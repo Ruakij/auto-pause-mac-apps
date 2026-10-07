@@ -337,9 +337,11 @@ An app counts as busy when anything in its process tree is:
 While the panel is open, every app row shows its state under the memory line, updated every
 3 seconds: busy (*"Busy: in use, git fetch"* with an hourglass; "in use" is the frontmost app) or
 idle (*"Idle 12 min"*, plus
-*"pauses in 3 min"* when auto-pause is on). Nothing is sampled for it while the panel is closed.
+*"pauses in 3 min"* when auto-pause is on). The details popover lists every busy reason, one per
+line, or the idle line. Nothing is sampled for it while the panel is closed.
 
-Busy apps are never auto-paused. Clicking Pause or Deep Sleep on a row shown busy shows what is
+Busy apps are never auto-paused. On a row shown busy, Pause and Deep Sleep carry a small
+hourglass, and their tooltip says a second click is needed. Clicking one shows what is
 still running (in the state line and the button tooltip) and turns the button into an orange
 **Force**, the same in app rows and the details popover; a second click within 5
 seconds goes ahead. A row shown idle acts at once. Right after the panel opens, before a state is

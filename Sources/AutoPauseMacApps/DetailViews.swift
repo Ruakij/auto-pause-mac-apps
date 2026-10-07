@@ -70,6 +70,8 @@ struct AppDetailView: View {
                     .frame(height: 90)
             }
 
+            stateSection
+
             Divider()
 
             // The stored setting is kept, so taking the app off the list brings it back.
@@ -90,14 +92,11 @@ struct AppDetailView: View {
             }
 
             HStack {
-                if let busyText = gate.text {
-                    Label(busyText, systemImage: "hourglass").font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                }
                 Spacer()
                 if !(entry.state == .running && entry.neverFreeze) {
                     let running = entry.state == .running
                     let inUse = running && model.isFrontmost(entry.pid)
-                    GatedButton(gate: gate, action: .pause,
+                    GatedButton(gate: gate, action: .pause, busy: running && liveState?.busy.isEmpty == false,
                                 help: inUse ? inUseHelp : "\(running ? "Pause" : "Resume") \(entry.name)",
                                 voiceOver: "\(running ? "Pause" : "Resume") \(entry.name)") {
                         if running {
@@ -119,6 +118,27 @@ struct AppDetailView: View {
         .padding(14)
         .frame(width: 280)
         .onDisappear { gate.clear() }
+    }
+
+    private var liveState: LiveState? {
+        entry.showsState ? entry.pid.flatMap { model.appStates[$0] } : nil
+    }
+
+    /// Every busy reason, one per line, or the idle line; follows the live pass. While Force is
+    /// armed, the reasons it was armed with.
+    @ViewBuilder
+    private var stateSection: some View {
+        if let reasons = gate.reasons ?? liveState.flatMap({ $0.busy.isEmpty ? nil : $0.busy }) {
+            VStack(alignment: .leading, spacing: 2) {
+                Label("Busy", systemImage: "hourglass")
+                ForEach(reasons, id: \.self) { reason in
+                    Text(reason).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        } else if let liveState {
+            Text(liveState.text()).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        }
     }
 
     private func save() {
