@@ -1,0 +1,21 @@
+# Builds the universal "Auto Pause Mac Apps.app" (ad-hoc signed) and attaches it zipped to the run.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./build.sh --universal
+      - run: ditto -c -k --keepParent "Auto Pause Mac Apps.app" AutoPauseMacApps.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoPauseMacApps-${{ github.sha }}
+          path: AutoPauseMacApps.zip
+          retention-days: 30

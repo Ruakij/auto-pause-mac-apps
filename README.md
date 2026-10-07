@@ -219,6 +219,9 @@ and a `v*` tag builds the DMG, uploads it to the project's generic package regis
 GitLab Release linking it. Notarization runs only when the runner has a Developer ID and the
 `AutoPauseNotary` notarytool profile.
 
+On GitHub, `.github/workflows/build.yml` runs `build.sh --universal` on every push to main and
+every pull request and attaches the zipped app (ad-hoc signed) to the run.
+
 ---
 
 ## Features in detail
