@@ -1,8 +1,9 @@
+import AppKit
 import SwiftUI
 
-/// First-run walkthrough. Four short pages that explain what the app does, where it lives,
-/// and offer to start it at login — so a menu-bar-only app with no Dock icon and no window
-/// doesn't just disappear on first launch.
+/// First-run walkthrough: what the app does, Free Up Memory, window pausing (where Accessibility
+/// is asked for), and where the app lives plus start at login, so a menu-bar-only app with no
+/// Dock icon and no window does not just disappear on first launch.
 struct OnboardingView: View {
     let onFinish: () -> Void
 
@@ -10,7 +11,7 @@ struct OnboardingView: View {
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var loginError: String?
 
-    private let pageCount = 4
+    private let pageCount = 5
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,6 +20,7 @@ struct OnboardingView: View {
                 case 0: WelcomePage()
                 case 1: TiersPage()
                 case 2: ReclaimPage()
+                case 3: WindowsPage()
                 default: FinishPage(launchAtLogin: $launchAtLogin, loginError: $loginError)
                 }
             }
@@ -101,9 +103,9 @@ private struct WelcomePage: View {
             }
             .frame(height: 190)
 
-            Text("Auto Pause Mac Apps")
+            Text("Auto Pause")
                 .font(.system(size: 26, weight: .bold))
-            Text("Reclaim memory from apps you're not using —\nwithout losing your place in any of them.")
+            Text("Reclaim memory from apps that sit idle,\nwithout losing your place in any of them.")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -127,23 +129,23 @@ private struct TiersPage: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            Text("Two ways to free memory")
+            Text("Two ways to reclaim memory")
                 .font(.system(size: 21, weight: .bold))
                 .padding(.top, 28)
 
             TierCard(icon: "pause.circle.fill", tint: .blue, title: "Pause",
-                     detail: "Freezes the app and every helper process it owns. Zero CPU, memory handed back, and resuming is instant and exact.",
+                     detail: "Freezes the app and every helper process it owns. No CPU, its memory becomes reclaimable, and resuming is instant and exact.",
                      badge: "Instant")
                 .offset(y: shown ? 0 : 24).opacity(shown ? 1 : 0)
                 .animation(.spring(response: 0.5, dampingFraction: 0.8).delay(0.05), value: shown)
 
             TierCard(icon: "moon.zzz.fill", tint: .indigo, title: "Deep Sleep",
-                     detail: "Quits the app after its state is saved, releasing all of its memory including swap. Waking restores your windows and tabs.",
-                     badge: "Frees everything")
+                     detail: "Quits the app the normal way, so it saves its state first, and releases all of its memory including swap. Waking restores its windows and tabs.",
+                     badge: "All memory")
                 .offset(y: shown ? 0 : 24).opacity(shown ? 1 : 0)
                 .animation(.spring(response: 0.5, dampingFraction: 0.8).delay(0.18), value: shown)
 
-            Label("Nothing is ever force-quit — unsaved work always wins",
+            Label("Nothing is ever force-quit: unsaved work always wins",
                   systemImage: "checkmark.shield.fill")
                 .font(.caption)
                 .foregroundStyle(.green)
@@ -188,8 +190,14 @@ private struct TierCard: View {
 }
 
 private struct ReclaimPage: View {
-    @State private var progress: CGFloat = 0
     @State private var shown = false
+
+    /// Illustration only: what the Free Up Memory checklist looks like.
+    private let sample: [(name: String, size: String, ticked: Bool, note: String?)] = [
+        ("Browser", "2.1 GB", true, nil),
+        ("Chat", "1.4 GB", true, nil),
+        ("Music", "0.6 GB", false, "Busy: playing audio"),
+    ]
 
     var body: some View {
         VStack(spacing: 18) {
@@ -197,50 +205,100 @@ private struct ReclaimPage: View {
                 .font(.system(size: 21, weight: .bold))
                 .padding(.top, 30)
 
-            Text("Set a target and Auto Pause frees it in one click —\nheaviest apps first, never the one you're using.")
+            Text("Free Up Memory lists the apps it can pause, heaviest first,\nnever the one in use. Untick anything still needed, then confirm.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
 
-            // A meter filling up to illustrate memory being handed back.
-            VStack(spacing: 8) {
-                HStack {
-                    Label("Free Up Memory", systemImage: "cpu.fill")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.teal)
-                    Spacer()
-                    Text("\(Int(progress * 8)) GB")
-                        .font(.system(size: 13, weight: .bold))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                }
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(.quaternary)
-                        Capsule()
-                            .fill(LinearGradient(colors: [.teal, .green],
-                                                 startPoint: .leading, endPoint: .trailing))
-                            .frame(width: geo.size.width * progress)
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Free Up Memory", systemImage: "cpu.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.teal)
+                ForEach(Array(sample.enumerated()), id: \.offset) { index, app in
+                    HStack(spacing: 8) {
+                        Image(systemName: app.ticked ? "checkmark.square.fill" : "square")
+                            .foregroundStyle(app.ticked ? Color.accentColor : .secondary)
+                        Text(app.name).font(.system(size: 12))
+                        if let note = app.note {
+                            Text(note).font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(app.size).font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
                     }
+                    .offset(x: shown ? 0 : 16).opacity(shown ? 1 : 0)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.8).delay(0.1 + Double(index) * 0.12), value: shown)
                 }
-                .frame(height: 9)
+                Divider()
+                Text("Up to 3.5 GB can be reclaimed")
+                    .font(.system(size: 12, weight: .semibold))
             }
             .padding(15)
             .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 13))
             .padding(.horizontal, 34)
-            .opacity(shown ? 1 : 0)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Example checklist: Browser and Chat ticked, Music busy and unticked, up to 3.5 GB can be reclaimed")
 
-            Text("Then **Restore** puts back exactly what it froze.")
+            Text("Then **Restore** resumes exactly what it paused.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .opacity(shown ? 1 : 0)
 
             Spacer(minLength: 0)
         }
-        .onAppear {
-            shown = true
-            withAnimation(.easeInOut(duration: 1.6).delay(0.3)) { progress = 1 }
+        .onAppear { shown = true }
+    }
+}
+
+/// Window pausing needs Accessibility, so this page is where the app asks for it: with the
+/// reason on screen, not unannounced at launch.
+private struct WindowsPage: View {
+    /// Re-read on activation: trust is granted in System Settings while this app runs.
+    @State private var trusted = Accessibility.isTrusted
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "macwindow.on.rectangle")
+                .font(.system(size: 44))
+                .foregroundStyle(Color.accentColor)
+                .padding(.top, 34)
+                .accessibilityHidden(true)
+
+            Text("Pause single windows")
+                .font(.system(size: 21, weight: .bold))
+
+            Text("In VS Code and its forks, each window can be paused on its own,\nwith its language servers and agents, while the others keep working.\nA paused window resumes when it is clicked, which needs Accessibility.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+
+            if trusted {
+                Label("Accessibility allowed", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.green)
+            } else {
+                Button("Allow Accessibility...") {
+                    Accessibility.requestTrust()
+                    trusted = Accessibility.isTrusted
+                }
+                .controlSize(.large)
+                // The system prompt appears at most once per app identity.
+                Button("Open System Settings") { Accessibility.openSettings() }
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+
+            Text("Optional: everything else works without it, and Window Pause stays off.\nSettings > General shows the state later.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 30)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            trusted = Accessibility.isTrusted
         }
     }
 }
@@ -271,7 +329,7 @@ private struct FinishPage: View {
 
             Text("It lives in your menu bar")
                 .font(.system(size: 20, weight: .bold))
-            Text("There's no Dock icon and no window. Click the pause\nicon near the clock any time to open it.")
+            Text("There is no Dock icon and no window. Click the pause\nicon near the clock any time to open it.")
                 .font(.system(size: 12.5))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -280,7 +338,7 @@ private struct FinishPage: View {
             Toggle(isOn: $launchAtLogin) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Start automatically at login").font(.system(size: 13, weight: .medium))
-                    Text("Recommended — it's only useful when it's running")
+                    Text("Recommended: it only works while it runs")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }

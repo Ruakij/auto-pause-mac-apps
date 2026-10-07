@@ -7,9 +7,9 @@
 	<key>CFBundleIdentifier</key>
 	<string>com.kodeking.AutoPauseMacApps</string>
 	<key>CFBundleName</key>
-	<string>Auto Pause Mac Apps</string>
+	<string>Auto Pause</string>
 	<key>CFBundleDisplayName</key>
-	<string>Auto Pause Mac Apps</string>
+	<string>Auto Pause</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

@@ -36,7 +36,7 @@ no telemetry, and no paid tier. There is nothing to buy.
 
 | Situation | What you do | What you get back |
 |---|---|---|
-| **Running a local LLM** (Ollama, LM Studio, llama.cpp) and there isn't enough free RAM | Open **Free Up Memory**, set a target of 8 GB, click once | Enough headroom to load the model, then one click to restore everything |
+| **Running a local LLM** (Ollama, LM Studio, llama.cpp) and there isn't enough free RAM | Open **Free Up Memory**, review the checklist ("up to 6.2 GB can be reclaimed"), confirm | Enough headroom to load the model, then one click on **Restore** to resume everything |
 | **Chrome or Edge is eating 6 GB** while you work in another app | Pause the browser | Gigabytes back, every tab exactly where it was when you resume |
 | **Claude, Codex, Cursor and Docker all open at once** and your Mac starts swapping | Pause the two you aren't touching | Memory pressure drops out of the red without closing anything |
 | **You're on battery and want it to last** | Pause background apps | They stop consuming CPU entirely, not just "less" |
@@ -70,7 +70,7 @@ exactly what tools showing only Activity Monitor's footprint number hide from yo
 
 *(Screenshot from 1.2. In 1.3 this became a reviewable checklist — see below.)*
 
-Clicking **Free Up Memory** now shows you every app it proposes to pause, with its memory cost
+Clicking **Free Up Memory** shows every app it proposes to pause, with its memory cost
 and a tickbox. Untick anything you're still using. **Nothing is paused until you press the
 confirm button.**
 
@@ -240,8 +240,10 @@ windows paused". Clicking into a paused window resumes it; bringing the app to t
 not resume windows that were not clicked. An app cannot quit while one of its windows is
 paused, so its paused windows resume when Cmd-Q is pressed in it, when another of its windows
 closes, and at logout or shutdown. Windows are mapped with `code --status` (no
-permission); waking on click needs Accessibility, which the app asks for at launch. Without it
-the window Pause button is disabled, and Settings has a button to grant it.
+permission); waking on click needs Accessibility, asked for on a page of the first-run
+walkthrough that explains window pausing (never at launch). Without it the window Pause button
+is disabled with a tooltip, and **Settings > General** shows the state with a button to System
+Settings > Privacy & Security > Accessibility.
 
 ### 🌙 Deep Sleep — free everything, including swap
 
@@ -256,8 +258,9 @@ apps that restore their windows the warning appears once; for all others it appe
 ### 🧠 Free Up Memory — the local model button, with a safety net
 
 Need several GB free to load a model? Click **Free Up Memory**, review the proposed list,
-untick anything you're using, and confirm. It pauses exactly what you approved — never your
-frontmost app, never itself, and never a background service.
+untick anything you're using, and confirm. The total reads "up to X can be reclaimed": pausing
+makes the memory reclaimable, and macOS takes it back as it needs it. It pauses exactly what you
+approved: never your frontmost app, never itself, and never a background service.
 
 **Restore** undoes precisely that set, leaving anything you froze by hand alone.
 
@@ -291,8 +294,9 @@ that display only footprint make pausing look like it did nothing at all.
 
 Because the app has no Dock icon and no window, a menu-bar-only utility can vanish the moment
 you install it. A short animated walkthrough runs on first launch: what the two tiers do, how
-Free Up Memory works, and an arrow pointing at where in the menu bar to find it — plus the
-option to start at login. You can reopen it any time from **Settings > General > Show the Walkthrough Again**.
+the Free Up Memory checklist works, window pausing in VS Code (with the button that asks for
+Accessibility), and an arrow pointing at where in the menu bar to find it, plus the option to
+start at login. You can reopen it any time from **Settings > General > Show the Walkthrough Again**.
 
 ### 🚀 Start at login
 
@@ -387,7 +391,8 @@ right-click → Open no longer works — use System Settings → Privacy & Secur
 
 No root, no password, no kernel extension, no entitlements. It uses Unix signals and Apple's
 public `libproc` APIs, which work on processes owned by the same user by design. The one
-permission it asks for is Accessibility, at launch: it is only used to see which window of a
+permission it asks for is Accessibility, from the walkthrough page on window pausing and never at
+launch: it is only used to see which window of a
 VS Code-family app is focused, so a paused window resumes when clicked and windows idle on their
 own. Everything else works without it.
 
