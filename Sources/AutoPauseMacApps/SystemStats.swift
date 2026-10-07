@@ -7,6 +7,9 @@ struct SystemStats {
     var appBytes: UInt64
     var wiredBytes: UInt64
     var compressedBytes: UInt64
+    /// Activity Monitor's "Cached Files": file-backed plus purgeable pages, dropped under
+    /// pressure without compressing or swapping.
+    var cachedBytes: UInt64
     var freeBytes: UInt64
     var swapUsedBytes: UInt64
     var swapTotalBytes: UInt64
@@ -18,6 +21,15 @@ struct SystemStats {
     }
 
     var usedBytes: UInt64 { appBytes + wiredBytes + compressedBytes }
+    /// Memory macOS can hand out without compressing or swapping. An overestimate: dirty file
+    /// pages need writeback and file pages in use fault straight back, and macOS exposes no
+    /// reserve to subtract for that.
+    var availableBytes: UInt64 { freeBytes + cachedBytes }
+    /// Pages no `vm_statistics64` counter covers (about 1% of RAM), so the rows sum to total.
+    var otherBytes: UInt64 {
+        let counted = usedBytes + cachedBytes + freeBytes
+        return totalBytes > counted ? totalBytes - counted : 0
+    }
     var usedFraction: Double {
         totalBytes == 0 ? 0 : Double(usedBytes) / Double(totalBytes)
     }
@@ -33,14 +45,17 @@ struct SystemStats {
         let pageSize = UInt64(vm_kernel_page_size)
         guard kr == KERN_SUCCESS else {
             return SystemStats(totalBytes: UInt64(ProcessInfo.processInfo.physicalMemory),
-                                appBytes: 0, wiredBytes: 0, compressedBytes: 0, freeBytes: 0,
+                                appBytes: 0, wiredBytes: 0, compressedBytes: 0, cachedBytes: 0, freeBytes: 0,
                                 swapUsedBytes: 0, swapTotalBytes: 0, pressureLevel: readPressureLevel())
         }
 
         let app = (UInt64(stats.internal_page_count) - UInt64(stats.purgeable_count)) * pageSize
         let wired = UInt64(stats.wire_count) * pageSize
         let compressed = UInt64(stats.compressor_page_count) * pageSize
-        let free = UInt64(stats.free_count) * pageSize
+        let cached = (UInt64(stats.external_page_count) + UInt64(stats.purgeable_count)) * pageSize
+        // free_count includes speculative pages (read-ahead), which external_page_count already
+        // counts as cache.
+        let free = UInt64(stats.free_count - min(stats.free_count, stats.speculative_count)) * pageSize
 
         var swapUsage = xsw_usage()
         var size = MemoryLayout<xsw_usage>.size
@@ -51,6 +66,7 @@ struct SystemStats {
             appBytes: app,
             wiredBytes: wired,
             compressedBytes: compressed,
+            cachedBytes: cached,
             freeBytes: free,
             swapUsedBytes: UInt64(swapUsage.xsu_used),
             swapTotalBytes: UInt64(swapUsage.xsu_total),

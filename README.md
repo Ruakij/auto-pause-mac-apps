@@ -107,13 +107,21 @@ still frozen.
 
 ### System dashboard — where your memory actually went
 
-![Memory pressure dashboard showing a 77 percent ring gauge marked Warning, a usage history graph, and a breakdown of App 5.06 GB, Wired 2.43 GB, Compressed 4.97 GB, Free 436.5 MB and Swap Used 4.4 GB](docs/screenshots/system-dashboard.png)
+![Memory pressure dashboard showing a ring gauge of RAM used with the pressure level, a usage history graph, and a breakdown of App, Wired, Compressed, Cached Files, Free, Other, Available and Swap Used](docs/screenshots/system-dashboard.png)
 
 The memory pressure macOS itself reports (Normal / Warning / Critical, from
 `kern.memorystatus_vm_pressure_level`), a gauge of RAM used, usage history, the apps holding the
 most resident memory, and the full
-breakdown from `host_statistics64`: **App 5.06 GB · Wired 2.43 GB · Compressed 4.97 GB · Free
-436.5 MB · Swap 4.4 GB**.
+breakdown from `host_statistics64`: **App, Wired, Compressed** (together "used", the same
+figure as Activity Monitor's "Memory Used"), **Cached Files, Free, Other**, which add up to
+the installed RAM, then **Available** and **Swap Used**. Cached Files are file-backed and
+purgeable pages (Linux `free` calls them buff/cache), dropped first when memory runs short.
+Free excludes speculative read-ahead pages, which are already cache. Other is the small rest no
+counter covers (about 1%). Available is free plus cached files: memory macOS can reuse without
+compressing or swapping, an estimate (dirty file pages need writing back first). The panel
+header reads "Memory: 38.2 GB used, 9.1 GB available", and its usage chart takes its colour
+from the kernel pressure level (green, orange, red), so a Mac with RAM nearly full of cache and
+compressed pages but no pressure shows green.
 
 This view explains why "Memory Used" can look stuck. Nearly 5 GB here is *compressed* — data
 macOS has already squeezed to make room. Compressed pages still count as used, so the headline

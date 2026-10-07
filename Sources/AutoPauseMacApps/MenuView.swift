@@ -117,7 +117,7 @@ struct MenuView: View {
                 HStack {
                     RingGaugeView(fraction: model.systemStats.usedFraction, lineWidth: 3, showLabel: false)
                         .frame(width: 22, height: 22)
-                    Text("Memory: \(Self.fmt(model.usedMemory)) of \(Self.fmt(model.totalMemory)) used")
+                    Text("Memory: \(Self.fmt(model.usedMemory)) used, \(Self.fmt(model.systemStats.availableBytes)) available")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -139,6 +139,7 @@ struct MenuView: View {
     }
 
     private var pressureAccent: Color {
+        if let level = model.systemStats.pressureLevel { return level.color }
         switch model.systemStats.usedFraction {
         case ..<0.6: return .green
         case ..<0.85: return .orange

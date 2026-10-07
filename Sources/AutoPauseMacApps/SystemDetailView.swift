@@ -42,7 +42,7 @@ struct SystemDetailView: View {
                         Text("Memory Pressure").font(.system(size: 13, weight: .semibold))
                         Text(pressureLabel(level))
                             .font(.caption)
-                            .foregroundStyle(pressureColor(level))
+                            .foregroundStyle(level.color)
                     } else {
                         Text("Memory used").font(.system(size: 13, weight: .semibold))
                     }
@@ -70,7 +70,14 @@ struct SystemDetailView: View {
                 legendRow("App", .blue, stats.appBytes)
                 legendRow("Wired", .orange, stats.wiredBytes)
                 legendRow("Compressed", .pink, stats.compressedBytes)
+                legendRow("Cached Files", .teal, stats.cachedBytes)
+                    .help("File-backed and purgeable pages (buff/cache in Linux free), dropped first when memory runs short.")
                 legendRow("Free", .gray, stats.freeBytes)
+                legendRow("Other", Self.otherColor, stats.otherBytes)
+                    .help("Pages no system counter covers.")
+                Divider()
+                legendRow("Available", nil, stats.availableBytes)
+                    .help("Free plus cached files: memory macOS can reuse without compressing or swapping. An estimate.")
                 legendRow("Swap Used", .purple, stats.swapUsedBytes)
             }
 
@@ -103,7 +110,9 @@ struct SystemDetailView: View {
                 segment(.blue, stats.appBytes, geo.size.width)
                 segment(.orange, stats.wiredBytes, geo.size.width)
                 segment(.pink, stats.compressedBytes, geo.size.width)
+                segment(.teal, stats.cachedBytes, geo.size.width)
                 segment(.gray, stats.freeBytes, geo.size.width)
+                segment(Self.otherColor, stats.otherBytes, geo.size.width)
             }
         }
         .frame(height: 8)
@@ -115,9 +124,12 @@ struct SystemDetailView: View {
         return color.frame(width: max(0, totalWidth * CGFloat(fraction)))
     }
 
-    private func legendRow(_ label: String, _ color: Color, _ bytes: UInt64) -> some View {
+    private static let otherColor = Color.primary.opacity(0.15)
+
+    /// A nil color leaves the dot out, for rows without a bar segment.
+    private func legendRow(_ label: String, _ color: Color?, _ bytes: UInt64) -> some View {
         HStack {
-            Circle().fill(color).frame(width: 7, height: 7)
+            Circle().fill(color ?? .clear).frame(width: 7, height: 7)
             Text(label).font(.caption2)
             Spacer()
             Text(MenuView.fmt(bytes)).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
@@ -136,9 +148,11 @@ struct SystemDetailView: View {
         case .critical: return "Critical"
         }
     }
+}
 
-    private func pressureColor(_ level: SystemStats.PressureLevel) -> Color {
-        switch level {
+extension SystemStats.PressureLevel {
+    var color: Color {
+        switch self {
         case .normal: return .green
         case .warning: return .orange
         case .critical: return .red
