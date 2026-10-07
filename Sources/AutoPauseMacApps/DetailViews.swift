@@ -30,6 +30,51 @@ struct SparklineView: View {
     }
 }
 
+/// CPU history of one app, on a log scale from 0.1 % (the row's display floor) up to
+/// max(100 %, peak): the busy threshold (0.5 % by default) lands about a quarter up instead of
+/// on the bottom edge, and a full core still reaches the top. With `threshold`, a dashed line
+/// marks the CPU busy condition.
+struct CPUSparklineView: View {
+    let history: [Double]
+    var threshold: Double?
+    var color: Color = .pink
+    var lineWidth: CGFloat = 1.5
+    var fill = true
+
+    private static let floor = 0.1
+
+    var body: some View {
+        Canvas { context, size in
+            guard history.count > 1 else { return }
+            let ceiling = log10(max(100, history.max() ?? 0) / Self.floor)
+            func y(_ v: Double) -> CGFloat {
+                size.height * (1 - CGFloat(log10(max(v, Self.floor) / Self.floor) / ceiling))
+            }
+
+            if let threshold {
+                var mark = Path()
+                mark.move(to: CGPoint(x: 0, y: y(threshold)))
+                mark.addLine(to: CGPoint(x: size.width, y: y(threshold)))
+                context.stroke(mark, with: .color(color.opacity(0.6)), style: StrokeStyle(lineWidth: 0.75, dash: [2, 2]))
+            }
+
+            var line = Path()
+            for (i, v) in history.enumerated() {
+                let point = CGPoint(x: size.width * CGFloat(i) / CGFloat(history.count - 1), y: y(v))
+                if i == 0 { line.move(to: point) } else { line.addLine(to: point) }
+            }
+            if fill {
+                var area = line
+                area.addLine(to: CGPoint(x: size.width, y: size.height))
+                area.addLine(to: CGPoint(x: 0, y: size.height))
+                area.closeSubpath()
+                context.fill(area, with: .color(color.opacity(0.15)))
+            }
+            context.stroke(line, with: .color(color), style: StrokeStyle(lineWidth: lineWidth, lineJoin: .round))
+        }
+    }
+}
+
 /// Per-app detail popover: memory history graph + idle auto-pause settings.
 struct AppDetailView: View {
     let entry: AppEntry
@@ -51,7 +96,7 @@ struct AppDetailView: View {
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(entry.name).font(.system(size: 14, weight: .semibold))
-                    Text("\(MenuView.fmt(entry.resident)) in RAM, \(MenuView.fmt(entry.footprint)) footprint")
+                    Text("\(MenuView.fmt(entry.resident)) in RAM, \(MenuView.fmt(entry.footprint)) footprint" + (cpuText.map { ", \($0)" } ?? ""))
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -68,6 +113,16 @@ struct AppDetailView: View {
                 Text("Collecting memory history...")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(height: 90)
+            }
+
+            if entry.state == .running, let cpuHistory = entry.pid.flatMap({ model.cpuHistory[$0] }), cpuHistory.count > 1 {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("CPU over last \(cpuHistory.count * 3)s")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                    CPUSparklineView(history: cpuHistory, threshold: model.cpuThreshold, lineWidth: 2)
+                        .frame(height: 60)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                }
             }
 
             stateSection
@@ -118,6 +173,11 @@ struct AppDetailView: View {
         .padding(14)
         .frame(width: 280)
         .onDisappear { gate.clear() }
+    }
+
+    private var cpuText: String? {
+        guard entry.state == .running, let percent = entry.pid.flatMap({ model.cpu[$0] }) else { return nil }
+        return "\(BusyPass.format(percent))% CPU"
     }
 
     private var liveState: LiveState? {

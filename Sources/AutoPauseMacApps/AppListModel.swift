@@ -84,6 +84,18 @@ final class AppListModel: ObservableObject {
     /// Live state per app, computed while the panel is open; absent until a pass could
     /// measure it.
     @Published private(set) var appStates: [pid_t: LiveState] = [:]
+    /// CPU percent per app tree (100 = one core) from the live pass, the sum the CPU busy
+    /// condition judges; absent for frozen apps and until a pass could measure the app.
+    @Published private(set) var cpu: [pid_t: Double] = [:]
+    /// Rolling per-app CPU figures, one per completed live pass, for the CPU graphs.
+    @Published private(set) var cpuHistory: [pid_t: [Double]] = [:]
+    /// CPU percent per process of the last live pass; `cpu` is its sum per tree.
+    private(set) var processCPU: [pid_t: Double] = [:]
+
+    /// The CPU busy threshold, which the CPU graphs mark; nil while that condition is off.
+    var cpuThreshold: Double? {
+        busySettings.enabled.contains(.cpu) ? busySettings.cpuThresholdPercent : nil
+    }
 
     /// Rolling per-app resident samples for the sparklines. ~40 samples at 3s ≈ 2 minutes.
     private var history: [pid_t: [UInt64]] = [:]
@@ -206,6 +218,8 @@ final class AppListModel: ObservableObject {
         timer = nil
         livePassGeneration += 1
         appStates = [:]
+        cpu = [:]
+        processCPU = [:]
     }
 
     func runningApp(for entry: AppEntry) -> NSRunningApplication? {
@@ -228,6 +242,7 @@ final class AppListModel: ObservableObject {
 
         let livePids = Set(apps.map(\.processIdentifier))
         history = history.filter { livePids.contains($0.key) }
+        cpuHistory = cpuHistory.filter { livePids.contains($0.key) }
         footprintAtPause = footprintAtPause.filter { livePids.contains($0.key) }
 
         var newEntries: [AppEntry] = []
@@ -460,20 +475,33 @@ final class AppListModel: ObservableObject {
 
     /// One busy pass over every listed app, off the main thread, on each refresh while the
     /// panel is open. CPU is measured since the previous pass, so the first pass after a while
-    /// yields no state for most rows; the next one, 3 s later, does. Never-freeze apps and
-    /// frozen apps get no state.
+    /// yields no state for most rows; the next one, 3 s later, does. CPU is measured for every
+    /// running app, also with the CPU condition off; never-freeze apps get a CPU figure but no
+    /// state. Frozen apps are not measured.
     private func startLivePass(_ apps: [NSRunningApplication]) {
         guard timer != nil, livePass == nil else { return }
-        let roots = apps.filter { !isNeverFreeze($0.bundleIdentifier) }.map(\.processIdentifier)
-            .filter { !ProcessControl.isStopped($0) && !PausedStore.shared.contains(pid: $0) }
+        let running = apps.filter { !ProcessControl.isStopped($0.processIdentifier) && !PausedStore.shared.contains(pid: $0.processIdentifier) }
+        let roots = running.map(\.processIdentifier)
+        let neverFrozen = Set(running.filter { isNeverFreeze($0.bundleIdentifier) }.map(\.processIdentifier))
         let generation = livePassGeneration
         let settings = busySettings
         livePass = Task { @MainActor in
-            let results = await busy.findings(roots: roots, settings: settings, waitForCPU: false)
+            let pass = await busy.pass(roots: roots, settings: settings, waitForCPU: false, alwaysMeasureCPU: true)
             livePass = nil
             guard generation == livePassGeneration else { return }
+            var newCPU: [pid_t: Double] = [:]
+            var newHistory = cpuHistory
+            for (i, pid) in roots.enumerated() {
+                guard let percent = pass.cpuPercent(tree: i) else { continue }
+                newCPU[pid] = percent
+                newHistory[pid, default: []].append(percent)
+                if newHistory[pid]!.count > historyLimit { newHistory[pid]!.removeFirst(newHistory[pid]!.count - historyLimit) }
+            }
+            processCPU = pass.cpu
+            cpu = newCPU
+            cpuHistory = newHistory
             var newApps: [pid_t: LiveState] = [:]
-            for (pid, found) in zip(roots, results) {
+            for (pid, found) in zip(roots, pass.findings) where !neverFrozen.contains(pid) {
                 let inUse = pid == frontPid
                 guard found != nil || inUse else { continue }
                 newApps[pid] = LiveState(busy: (inUse ? ["in use"] : []) + (found ?? []).details,

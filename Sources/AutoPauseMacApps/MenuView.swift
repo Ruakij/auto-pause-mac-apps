@@ -321,8 +321,13 @@ private struct AppRow: View {
             Spacer(minLength: 4)
 
             if entry.history.count > 1 {
-                SparklineView(history: entry.history, color: entry.state == .running ? .blue : .gray)
-                    .frame(width: 44, height: 20)
+                ZStack {
+                    SparklineView(history: entry.history, color: entry.state == .running ? .blue : .gray)
+                    if entry.state == .running, let cpuHistory = entry.pid.flatMap({ model.cpuHistory[$0] }) {
+                        CPUSparklineView(history: cpuHistory, threshold: model.cpuThreshold, lineWidth: 1, fill: false)
+                    }
+                }
+                .frame(width: 44, height: 20)
             }
 
             if entry.state != .sleeping {
@@ -488,14 +493,19 @@ private struct AppRow: View {
         }
     }
 
-    /// Resident RAM only: the memory held right now, which drops when an app is paused.
-    /// Footprint barely moves (it counts compressed and swapped pages); the detail view has it.
+    /// Resident RAM, the memory held right now, which drops when an app is paused, then the
+    /// app's CPU. Footprint barely moves (it counts compressed and swapped pages); the detail
+    /// view has it.
     private var memoryLine: some View {
         HStack(spacing: 5) {
             if entry.state == .sleeping {
                 Text("Quit, relaunches on Wake").font(.system(size: 10))
             } else {
                 Text(MenuView.fmt(entry.resident)).font(.system(size: 10)).monospacedDigit()
+            }
+            // Idle apps stay quiet: below 0.1 % the figure is noise.
+            if entry.state == .running, let percent = entry.pid.flatMap({ model.cpu[$0] }), percent >= 0.1 {
+                Text("\(BusyPass.format(percent))% CPU").font(.system(size: 10)).monospacedDigit()
             }
             if entry.reclaimedBytes > 0 {
                 Text("freed \(MenuView.fmt(entry.reclaimedBytes))")

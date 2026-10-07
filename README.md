@@ -54,7 +54,9 @@ Two sections:
 - **Paused / Asleep (top)** - paused apps are tagged `PAUSED`, deep-slept ones `ASLEEP`
   ("Quit, relaunches on Wake"), each with a button to bring them straight back (Wake shows
   "Waking..." while the app relaunches). They pin to the top so a paused app is never lost.
-- **Apps** - running apps sorted by the RAM they actually hold, each with a live sparkline and,
+- **Apps** - running apps sorted by the RAM they actually hold, each with its CPU use next to
+  the memory figure (*"1.2 GB  12% CPU"*, hidden below 0.1 %), a live sparkline (memory in blue,
+  CPU in pink with a dashed line at the CPU busy threshold) and,
   at the right edge of every row in the same order: details and auto-pause, Deep Sleep and
   Pause.
 
@@ -132,7 +134,8 @@ number stays high even while apps are being frozen and memory is genuinely being
 ![Microsoft Edge detail popover showing 3.83 GB in RAM of 6.57 GB total, a memory graph over the last 120 seconds, an auto-pause when idle toggle, and a Pause Now button](docs/screenshots/app-detail.png)
 
 Every app has a detail view with its resident-vs-total split (**Edge: 3.83 GB in RAM · 6.57 GB
-total**), a rolling two-minute memory graph, and **Auto-pause when idle** — freeze this app
+total**) and its CPU use, a rolling two-minute memory graph, a CPU graph under it (marking the
+CPU busy threshold while that condition is on), and **Auto-pause when idle** — freeze this app
 automatically after N minutes in the background, thaw it when you come back. Off by default,
 set per app.
 
@@ -338,7 +341,11 @@ While the panel is open, every app row shows its state under the memory line, up
 3 seconds: busy (*"Busy: in use, git fetch"* with an hourglass; "in use" is the frontmost app) or
 idle (*"Idle 12 min"*, plus
 *"pauses in 3 min"* when auto-pause is on). The details popover lists every busy reason, one per
-line, or the idle line. Nothing is sampled for it while the panel is closed.
+line, or the idle line. CPU figures come from the same samples the CPU condition judges, so a
+row never shows a figure that disagrees with its "Busy: CPU" reason; they are measured for every
+running app, never-freeze apps included, also while the CPU condition is switched off. The CPU
+graphs use a logarithmic scale from 0.1 % to 100 % of one core (higher when an app uses more),
+so a low threshold stays visible. Nothing is sampled for any of this while the panel is closed.
 
 Busy apps are never auto-paused. On a row shown busy, Pause and Deep Sleep carry a small
 hourglass, and their tooltip says a second click is needed. Clicking one shows what is

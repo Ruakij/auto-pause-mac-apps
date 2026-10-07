@@ -14,6 +14,27 @@ struct BusyFinding: Equatable {
     var detail: String
 }
 
+/// One evaluation over several app trees.
+struct BusyPass {
+    /// Per tree, in order; nil as described at `BusyDetector.findings`.
+    var findings: [[BusyFinding]?]
+    /// CPU percent (100 = one core) per pid that could be measured in this pass.
+    var cpu: [pid_t: Double]
+    var trees: [[pid_t]]
+
+    /// The app figure of tree `i`: the sum the CPU condition judges. Nil while none of its pids
+    /// has a measurement.
+    func cpuPercent(tree i: Int) -> Double? {
+        let measured = trees[i].compactMap { cpu[$0] }
+        return measured.isEmpty ? nil : measured.reduce(0, +)
+    }
+
+    /// "35" from 10 %, "0.4" below.
+    static func format(_ percent: Double) -> String {
+        percent >= 10 ? String(format: "%.0f", percent) : String(format: "%.1f", percent)
+    }
+}
+
 /// Evaluates busy conditions over a set of pids. Stateful (unlike `ProcessControl`): it keeps
 /// recent CPU samples per pid so a re-check measures CPU since an earlier check. The panel's
 /// live pass (every 3 s) and the auto-pause checks share these samples; each asks for its own
@@ -40,8 +61,9 @@ final class BusyDetector {
     /// CPU is measured against the newest earlier sample at least `minCPUWindow` seconds old.
     /// Without `waitForCPU`, a tree with no such sample for any of its pids is only sampled and
     /// its result is nil: the caller checks again later, and that check measures over the gap.
+    /// With `alwaysMeasureCPU`, CPU is measured even while the CPU condition is off, for display.
     func findings(forTrees trees: [[pid_t]], settings: BusySettings, waitForCPU: Bool = true,
-                  minCPUWindow: TimeInterval = 0) -> [[BusyFinding]?] {
+                  minCPUWindow: TimeInterval = 0, alwaysMeasureCPU: Bool = false) -> BusyPass {
         let on = settings.enabled
         let pids = trees.flatMap { $0 }
         let pidSet = Set(pids)
@@ -56,8 +78,9 @@ final class BusyDetector {
         if on.contains(.inputTap) { shared += inputTapFindings(pidSet) }
         if on.contains(.processes) { shared += processFindings(Array(pidSet), patterns: settings.patterns) }
 
-        let usage = on.contains(.cpu) ? measureCPU(pidSet, minWindow: minCPUWindow, wait: waitForCPU) : [:]
-        return trees.map { tree in
+        let usage = on.contains(.cpu) || alwaysMeasureCPU
+            ? measureCPU(pidSet, minWindow: minCPUWindow, wait: waitForCPU) : [:]
+        let results: [[BusyFinding]?] = trees.map { tree in
             let members = Set(tree)
             var result: [BusyFinding] = []
             if on.contains(.cpu) {
@@ -67,6 +90,7 @@ final class BusyDetector {
             }
             return result + shared.filter { members.contains($0.pid) }
         }
+        return BusyPass(findings: results, cpu: usage, trees: trees)
     }
 
     // MARK: CPU
@@ -109,8 +133,7 @@ final class BusyDetector {
     private func cpuFinding(_ usage: [(pid: pid_t, percent: Double)], thresholdPercent: Double) -> BusyFinding? {
         let totalPercent = usage.reduce(0) { $0 + $1.percent }
         guard let top = usage.max(by: { $0.percent < $1.percent }), totalPercent >= thresholdPercent else { return nil }
-        let shown = totalPercent >= 10 ? String(format: "%.0f", totalPercent) : String(format: "%.1f", totalPercent)
-        return BusyFinding(condition: .cpu, pid: top.pid, detail: "CPU \(shown)%")
+        return BusyFinding(condition: .cpu, pid: top.pid, detail: "CPU \(BusyPass.format(totalPercent))%")
     }
 
     private static func cpuSample(_ pid: pid_t) -> CPUSample? {
@@ -405,11 +428,18 @@ final class BusyEvaluator: @unchecked Sendable {
     /// see `BusyDetector.findings(forTrees:settings:waitForCPU:minCPUWindow:)`.
     func findings(roots: [pid_t], settings: BusySettings, waitForCPU: Bool = true,
                   minCPUWindow: TimeInterval = 0) async -> [[BusyFinding]?] {
+        await pass(roots: roots, settings: settings, waitForCPU: waitForCPU, minCPUWindow: minCPUWindow).findings
+    }
+
+    /// The findings plus the CPU figures they were judged by, one tree per root.
+    func pass(roots: [pid_t], settings: BusySettings, waitForCPU: Bool = true,
+              minCPUWindow: TimeInterval = 0, alwaysMeasureCPU: Bool = false) async -> BusyPass {
         await withCheckedContinuation { cont in
             queue.async {
                 let trees = roots.map { ProcessControl.processTree(root: $0) }
                 cont.resume(returning: self.detector.findings(forTrees: trees, settings: settings,
-                                                              waitForCPU: waitForCPU, minCPUWindow: minCPUWindow))
+                                                              waitForCPU: waitForCPU, minCPUWindow: minCPUWindow,
+                                                              alwaysMeasureCPU: alwaysMeasureCPU))
             }
         }
     }
