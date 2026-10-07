@@ -91,6 +91,13 @@ struct LiveState: Equatable {
     }
 }
 
+/// A message shown above the app list until dismissed or replaced.
+struct Notice: Equatable {
+    let text: String
+    /// Something did not happen as asked; otherwise a confirmation.
+    var isWarning = false
+}
+
 @MainActor
 final class AppListModel: ObservableObject {
     @Published var entries: [AppEntry] = []
@@ -100,7 +107,9 @@ final class AppListModel: ObservableObject {
     @Published var systemStats: SystemStats = .current()
     @Published var systemHistory: [UInt64] = []
     /// Transient message shown in the panel, e.g. when an app refuses to sleep.
-    @Published var notice: String?
+    @Published var notice: Notice?
+    /// Bundle IDs of deep-slept apps whose relaunch is running.
+    @Published private(set) var waking: Set<String> = []
     /// Everything suspended by the last Local Model Mode run, so it can be undone exactly.
     @Published var reclaimSession: [pid_t] = []
     @Published var busySettings = BusySettings.load() {
@@ -432,14 +441,11 @@ final class AppListModel: ObservableObject {
         }
 
         reclaimSession = touched
-        if touched.isEmpty {
-            notice = "Nothing was paused."
-        } else {
-            notice = "Paused \(touched.count) app\(touched.count == 1 ? "" : "s"), freeing about \(MenuView.fmt(freed))."
-        }
-        if !skipped.isEmpty {
-            notice = (notice ?? "") + " Skipped \(skipped.joined(separator: ", "))."
-        }
+        var text = touched.isEmpty
+            ? "Nothing was paused."
+            : "Paused \(touched.count) app\(touched.count == 1 ? "" : "s"), up to \(MenuView.fmt(freed)) reclaimable."
+        if !skipped.isEmpty { text += " Skipped \(skipped.joined(separator: ", "))." }
+        notice = Notice(text: text, isWarning: touched.isEmpty || !skipped.isEmpty)
         refresh()
     }
 
@@ -452,7 +458,7 @@ final class AppListModel: ObservableObject {
             lastFrontDate[pid] = Date()
             scheduleAutoPause(pid)
         }
-        notice = "Restored \(reclaimSession.count) app\(reclaimSession.count == 1 ? "" : "s")."
+        notice = Notice(text: "Restored \(reclaimSession.count) app\(reclaimSession.count == 1 ? "" : "s").")
         reclaimSession = []
         refresh()
     }
@@ -657,7 +663,14 @@ final class AppListModel: ObservableObject {
     func pause(_ entry: AppEntry) {
         guard let pid = entry.pid else { return }
         footprintAtPause[pid] = entry.footprint
-        guard freeze(root: pid, bundleID: entry.bundleID) else { return }
+        guard freeze(root: pid, bundleID: entry.bundleID) else {
+            footprintAtPause[pid] = nil
+            notice = Notice(text: isNeverFreeze(entry.bundleID)
+                ? "\(entry.name) is on the Never freeze list and was not paused."
+                : "\(entry.name) could not be paused: it has quit, or Auto Pause runs inside it.",
+                isWarning: true)
+            return
+        }
         PausedStore.shared.add(PausedRecord(
             pid: pid, bundleID: entry.bundleID, name: entry.name, launchDate: entry.launchDate))
         cancelWindowTimers(pid)
@@ -697,9 +710,9 @@ final class AppListModel: ObservableObject {
                 // the app stays running; `sleep` thawed it if it was paused.
                 PausedStore.shared.remove(pid: pid)
                 footprintAtPause[pid] = nil
-                notice = "\(entry.name) did not quit (unsaved changes?) and stays open."
+                notice = Notice(text: "\(entry.name) did not quit (unsaved changes?) and stays open.", isWarning: true)
             case .failed(let message):
-                notice = "\(entry.name): \(message)"
+                notice = Notice(text: "\(entry.name): \(message)", isWarning: true)
             }
             refresh()
         }
@@ -708,14 +721,21 @@ final class AppListModel: ObservableObject {
     func wake(_ entry: AppEntry) {
         guard let rec = SleptStore.shared.records.first(where: { $0.bundleID == entry.id }) else { return }
         Task { @MainActor in
-            switch await DeepSleepController.wake(rec) {
-            case .success:
-                notice = nil
-            case .failure(let error):
-                notice = "Couldn't wake \(rec.name): \(error.localizedDescription). It's still listed — try again."
-            }
+            if await wake(rec) { notice = nil }
             refresh()
         }
+    }
+
+    /// Relaunches one slept app, marked as waking meanwhile; a failure posts a notice.
+    private func wake(_ rec: SleptRecord) async -> Bool {
+        guard waking.insert(rec.bundleID).inserted else { return false }
+        defer { waking.remove(rec.bundleID) }
+        if case .failure(let error) = await DeepSleepController.wake(rec) {
+            notice = Notice(text: "Could not wake \(rec.name): \(error.localizedDescription). It stays listed; try again.",
+                            isWarning: true)
+            return false
+        }
+        return true
     }
 
     func resumeAll() {
@@ -742,8 +762,10 @@ final class AppListModel: ObservableObject {
     func wakeAll() {
         let sleeping = SleptStore.shared.records
         Task { @MainActor in
-            for rec in sleeping { _ = await DeepSleepController.wake(rec) }
-            refresh()
+            for rec in sleeping {
+                _ = await wake(rec)
+                refresh()
+            }
         }
     }
 
@@ -880,18 +902,24 @@ final class AppListModel: ObservableObject {
     }
 
     func pauseWindow(_ entry: AppEntry, window: Int) async {
-        guard let app = runningApp(for: entry),
-              let target = await windowToFreeze(app: app, id: window),
-              !isWindowFrozen(WindowKey(pid: app.processIdentifier, window: window)) else { return }
-        freezeWindow(app: app, group: target.group, mapping: target.mapping, title: target.title)
+        // A window of an app paused as a whole is stopped already.
+        guard let app = runningApp(for: entry), !isFrozenWhole(app.processIdentifier) else { return }
+        let target = await windowToFreeze(app: app, id: window)
+        guard !isWindowFrozen(WindowKey(pid: app.processIdentifier, window: window)) else { return }
+        guard let target, freezeWindow(app: app, group: target.group, mapping: target.mapping, title: target.title) else {
+            notice = Notice(text: "A window of \(entry.name) could not be paused.", isWarning: true)
+            return
+        }
     }
 
     /// Freezes each root of the group with its tree. Shared processes and the app itself are
     /// never roots; `pauseTree` keeps its own guard against freezing this process. A frozen app
-    /// is left alone: its windows resume with it.
-    private func freezeWindow(app: NSRunningApplication, group: WindowGroup, mapping: WindowMapping, title: String?) {
+    /// is left alone: its windows resume with it. True if any root was frozen.
+    @discardableResult
+    private func freezeWindow(app: NSRunningApplication, group: WindowGroup, mapping: WindowMapping, title: String?) -> Bool {
         let appPid = app.processIdentifier
-        guard !isFrozenWhole(appPid) else { return }
+        guard !isFrozenWhole(appPid) else { return false }
+        var frozeAny = false
         let shared = Set(mapping.shared).union([appPid])
         let children = Set(ProcessControl.children(of: appPid))
         for role in ["renderer", "extension host", "file watcher"] {
@@ -901,9 +929,11 @@ final class AppListModel: ObservableObject {
             PausedStore.shared.add(PausedRecord(
                 pid: root, bundleID: app.bundleIdentifier, name: app.localizedName ?? "Unknown",
                 launchDate: start, ownerPid: appPid, windowId: group.id, windowTitle: title ?? group.title))
+            frozeAny = true
         }
         windowTimers.removeValue(forKey: WindowKey(pid: appPid, window: group.id))?.invalidate()
         refresh()
+        return frozeAny
     }
 
     func resumeWindow(_ entry: AppEntry, window: Int) {

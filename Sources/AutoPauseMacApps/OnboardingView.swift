@@ -134,7 +134,7 @@ private struct TiersPage: View {
                 .padding(.top, 28)
 
             TierCard(icon: "pause.circle.fill", tint: .blue, title: "Pause",
-                     detail: "Freezes the app and every helper process it owns. No CPU, its memory becomes reclaimable, and resuming is instant and exact.",
+                     detail: "Stops the app and every helper process it owns. No CPU, its memory becomes reclaimable, and resuming is instant and exact.",
                      badge: "Instant")
                 .offset(y: shown ? 0 : 24).opacity(shown ? 1 : 0)
                 .animation(.spring(response: 0.5, dampingFraction: 0.8).delay(0.05), value: shown)

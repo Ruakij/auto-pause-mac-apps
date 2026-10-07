@@ -9,14 +9,13 @@ struct SparklineView: View {
     var body: some View {
         Canvas { context, size in
             guard history.count > 1 else { return }
-            let maxV = max(history.max() ?? 1, 1)
-            let minV = min(history.min() ?? 0, maxV > 0 ? maxV - 1 : 0)
-            let range = max(Double(maxV - minV), 1)
+            // From 0, not the window's own minimum, so noise stays small.
+            let maxV = Double(max(history.max() ?? 1, 1))
 
             var line = Path()
             for (i, v) in history.enumerated() {
                 let x = size.width * CGFloat(i) / CGFloat(history.count - 1)
-                let norm = Double(v - minV) / range
+                let norm = Double(v) / maxV
                 let y = size.height * (1 - CGFloat(norm))
                 if i == 0 { line.move(to: CGPoint(x: x, y: y)) } else { line.addLine(to: CGPoint(x: x, y: y)) }
             }
@@ -52,7 +51,7 @@ struct AppDetailView: View {
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(entry.name).font(.system(size: 14, weight: .semibold))
-                    Text("\(MenuView.fmt(entry.resident)) in RAM · \(MenuView.fmt(entry.footprint)) total")
+                    Text("\(MenuView.fmt(entry.resident)) in RAM, \(MenuView.fmt(entry.footprint)) footprint")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -66,7 +65,7 @@ struct AppDetailView: View {
                         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
                 }
             } else {
-                Text("Collecting memory history…")
+                Text("Collecting memory history...")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(height: 90)
             }
@@ -88,22 +87,26 @@ struct AppDetailView: View {
 
             HStack {
                 if let busyText = gate.text {
-                    Text(busyText).font(.caption).foregroundStyle(.orange).lineLimit(2)
+                    Label(busyText, systemImage: "hourglass").font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
                 if entry.state == .running && entry.neverFreeze {
                     Label("On the Never freeze list", systemImage: "lock.fill")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Button(gate.armed == .pause ? "Force" : entry.state == .running ? "Pause Now" : "Resume") {
-                        if entry.state == .running {
+                    let running = entry.state == .running
+                    GatedButton(gate: gate, action: .pause, help: "\(running ? "Pause" : "Resume") \(entry.name)",
+                                voiceOver: "\(running ? "Pause" : "Resume") \(entry.name)") {
+                        if running {
                             gate.check(.pause, entry: entry, model: model) { model.pause(entry) }
                         } else {
                             model.resume(entry)
                         }
+                    } label: {
+                        Label(running ? "Pause" : "Resume", systemImage: running ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(running ? .blue : .green)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(gate.armed == .pause ? .orange : nil)
                 }
             }
         }

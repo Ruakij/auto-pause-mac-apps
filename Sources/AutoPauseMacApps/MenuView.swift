@@ -5,6 +5,9 @@ struct MenuView: View {
     @Environment(\.openSettings) private var openSettings
     @State private var showSystemDetail = false
     @State private var showReclaim = false
+    /// Row order frozen while the pointer is in the list, so a row that changes state does not
+    /// move away under the next click; nil re-sorts.
+    @State private var pinned: (top: [String], apps: [String])?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,33 +23,68 @@ struct MenuView: View {
                     .foregroundStyle(.secondary)
                     .frame(height: 80)
             } else {
-                let suspended = model.entries.filter { $0.state != .running }
-                let running = model.entries.filter { $0.state == .running }
+                let (top, apps) = sections
                 ScrollView {
                     VStack(spacing: 2) {
-                        section("SUSPENDED", suspended)
-                        section("APPS", running)
+                        section(Self.stoppedTitle(top), top)
+                        section("APPS", apps)
                     }
                     .padding(6)
                 }
                 // An explicit height, not maxHeight: a ScrollView has no intrinsic size, so
                 // the MenuBarExtra window would collapse it.
-                .frame(height: listHeight(sections: [suspended.count, running.count],
-                                          stateLines: running.filter(\.showsState).count)
+                .frame(height: listHeight(sections: [top.count, apps.count],
+                                          stateLines: model.entries.filter(\.showsState).count)
                        + model.entries.compactMap { $0.pid.flatMap { model.details[$0] }?.height }.reduce(0, +))
+                .onHover { inside in
+                    pinned = inside ? (top.map(Self.pinKey), apps.map(Self.pinKey)) : nil
+                }
             }
             Divider()
             footer
         }
         .frame(width: 380)
         .onAppear { model.startRefreshing() }
-        .onDisappear { model.stopRefreshing() }
+        // A panel closed under the pointer gets no hover exit.
+        .onDisappear { pinned = nil; model.stopRefreshing() }
     }
 
-    private func noticeBar(_ text: String) -> some View {
+    /// Paused and deep-slept apps on top, running ones below, each in model order; while
+    /// pinned, the pinned order with new rows appended.
+    private var sections: (top: [AppEntry], apps: [AppEntry]) {
+        let entries = model.entries
+        guard let pinned else {
+            return (entries.filter { $0.state != .running }, entries.filter { $0.state == .running })
+        }
+        let byId = Dictionary(entries.map { (Self.pinKey($0), $0) }, uniquingKeysWith: { a, _ in a })
+        let known = Set(pinned.top + pinned.apps)
+        let new = entries.filter { !known.contains(Self.pinKey($0)) }
+        return (pinned.top.compactMap { byId[$0] } + new.filter { $0.state != .running },
+                pinned.apps.compactMap { byId[$0] } + new.filter { $0.state == .running })
+    }
+
+    /// The entry id switches between pid and bundle ID on Deep Sleep and Wake; pinning by
+    /// bundle ID keeps that row in place.
+    private static func pinKey(_ entry: AppEntry) -> String { entry.bundleID ?? entry.id }
+
+    /// "2 paused, 1 asleep", the parts that are not zero.
+    private static func stoppedCounts(_ entries: [AppEntry]) -> [String] {
+        let paused = entries.filter { $0.state == .paused }.count
+        let asleep = entries.filter { $0.state == .sleeping }.count
+        return [paused > 0 ? "\(paused) paused" : nil, asleep > 0 ? "\(asleep) asleep" : nil].compactMap { $0 }
+    }
+
+    private static func stoppedTitle(_ entries: [AppEntry]) -> String {
+        let hasPaused = entries.contains { $0.state == .paused }
+        let hasAsleep = entries.contains { $0.state == .sleeping }
+        return hasAsleep && !hasPaused ? "ASLEEP" : hasAsleep ? "PAUSED AND ASLEEP" : "PAUSED"
+    }
+
+    private func noticeBar(_ notice: Notice) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: "info.circle.fill").font(.caption2).foregroundStyle(.orange)
-            Text(text).font(.caption2).foregroundStyle(.secondary)
+            Image(systemName: notice.isWarning ? "exclamationmark.triangle" : "checkmark.circle")
+                .font(.caption2).foregroundStyle(notice.isWarning ? .orange : .green)
+            Text(notice.text).font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
             Button {
@@ -59,7 +97,7 @@ struct MenuView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color.orange.opacity(0.08))
+        .background(notice.isWarning ? Color.orange.opacity(0.08) : Color.primary.opacity(0.04))
     }
 
     private var header: some View {
@@ -68,7 +106,7 @@ struct MenuView: View {
                 Text("Auto Pause").font(.headline)
                 Spacer()
                 if model.pausedCount > 0 {
-                    Label("\(model.pausedCount) suspended", systemImage: "pause.circle.fill")
+                    Label(Self.stoppedCounts(model.entries).joined(separator: ", "), systemImage: "pause.circle.fill")
                         .font(.caption)
                         .foregroundStyle(.blue)
                 }
@@ -132,7 +170,7 @@ struct MenuView: View {
             Button {
                 showReclaim = true
             } label: {
-                Label("Free Up Memory", systemImage: "cpu")
+                Label("Free Up Memory", systemImage: "memorychip")
             }
             .popover(isPresented: $showReclaim, arrowEdge: .top) {
                 ReclaimView(model: model) { showReclaim = false }
@@ -236,19 +274,23 @@ private struct AppRow: View {
         )
     }
 
+    private var waking: Bool { model.waking.contains(entry.id) }
+
     private var row: some View {
         HStack(spacing: 8) {
             if let pid = entry.pid {
+                let expanded = model.expanded.contains(pid)
                 Button { model.toggleExpanded(pid) } label: {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(model.expanded.contains(pid) ? 90 : 0))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
                         .frame(width: 10)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Processes")
+                .accessibilityLabel("\(expanded ? "Hide" : "Show") processes of \(entry.name)")
             } else {
                 Color.clear.frame(width: 10)
             }
@@ -273,7 +315,10 @@ private struct AppRow: View {
                     badge
                 }
                 memoryLine
-                if entry.showsState || gate.text != nil { stateLine }
+                if entry.showsState || gate.text != nil {
+                    // A blank line until the first pass, so the row keeps its height.
+                    liveStateLine(gateText: gate.text, state: entry.pid.flatMap { model.appStates[$0] }, placeholder: " ")
+                }
             }
 
             if entry.history.count > 1 {
@@ -290,36 +335,21 @@ private struct AppRow: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Memory history & settings")
+                .help("Details and auto-pause")
+                .accessibilityLabel("Details and auto-pause for \(entry.name)")
                 .popover(isPresented: $showDetail, arrowEdge: .trailing) {
                     AppDetailView(entry: entry, model: model)
                 }
             }
 
-            // Deep Sleep — quits the app, freeing everything including swap.
             if entry.canDeepSleep {
-                Button {
-                    gate.check(.deepSleep, entry: entry, model: model) {
-                        // The seen flag only covers apps that restore their windows; for the rest
-                        // the warning is the only notice that windows may be lost.
-                        if PauseFlags.hasSeenDeepSleepWarning,
-                           DeepSleepController.canRestoreState(bundleID: entry.bundleID).kind == .good {
-                            model.deepSleep(entry)
-                        } else {
-                            showSleepWarning = true
-                        }
-                    }
-                } label: {
-                    if gate.armed == .deepSleep {
-                        forceLabel("moon.zzz.fill")
-                    } else {
-                        Image(systemName: "moon.zzz.fill")
-                            .font(.system(size: 16))
-                            .foregroundStyle(.indigo)
-                    }
+                GatedButton(gate: gate, action: .deepSleep,
+                            help: "Deep Sleep \(entry.name): quit it and free all its memory, relaunch on Wake",
+                            voiceOver: "Deep Sleep \(entry.name)", perform: deepSleepTapped) {
+                    Image(systemName: "moon.zzz.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.indigo)
                 }
-                .buttonStyle(.plain)
-                .help(gate.armed == .deepSleep ? forceHelp : "Deep Sleep \(entry.name): quit it and free all its memory, relaunch on Wake")
                 .popover(isPresented: $showSleepWarning, arrowEdge: .trailing) {
                     DeepSleepWarningView(
                         entry: entry,
@@ -332,63 +362,106 @@ private struct AppRow: View {
                 }
             }
 
-            // Pause / Resume / Wake. Sleeping rows get an explicit labelled button — an
-            // icon alone left it unclear that a quit app could be brought straight back.
+            // Sleeping rows get an explicit labelled button: an icon alone left it unclear
+            // that a quit app could be brought straight back.
             if entry.state == .sleeping {
-                Button {
-                    model.resume(entry)
-                } label: {
-                    Label("Wake", systemImage: "play.circle.fill")
+                Button(action: mainAction) {
+                    Label(waking ? "Waking..." : "Wake", systemImage: "play.circle.fill")
                         .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
                 .controlSize(.small)
+                .disabled(waking)
                 .help(actionHelp)
+                .accessibilityLabel("Wake \(entry.name)")
             } else if entry.state == .running && entry.neverFreeze {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 15))
                     .foregroundStyle(.secondary)
                     .frame(width: 20)
                     .help("On the Never freeze list")
+                    .accessibilityLabel("\(entry.name) is on the Never freeze list")
             } else {
-                Button {
-                    if entry.state == .running {
-                        gate.check(.pause, entry: entry, model: model) { model.pause(entry) }
-                    } else {
-                        model.resume(entry)
-                    }
-                } label: {
-                    if gate.armed == .pause {
-                        forceLabel("pause.circle.fill")
-                    } else {
-                        Image(systemName: entry.state == .running ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.system(size: 20))
-                            .foregroundStyle(entry.state == .running ? .blue : .green)
-                    }
+                GatedButton(gate: gate, action: .pause, help: actionHelp,
+                            voiceOver: "\(entry.state == .running ? "Pause" : "Resume") \(entry.name)",
+                            perform: mainAction) {
+                    Image(systemName: entry.state == .running ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(entry.state == .running ? .blue : .green)
                 }
-                .buttonStyle(.plain)
-                .help(gate.armed == .pause ? forceHelp : actionHelp)
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .contextMenu { menu }
         .onHover { inside in
             hovering = inside
             if !inside { gate.clear() }
         }
     }
 
-    private func forceLabel(_ systemImage: String) -> some View {
-        Label("Force", systemImage: systemImage)
-            .font(.system(size: 11, weight: .medium))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Color.orange, in: Capsule())
-            .foregroundStyle(.white)
+    @ViewBuilder
+    private var menu: some View {
+        switch entry.state {
+        case .running:
+            // A menu closing outside the row resets the gate, so a row shown busy offers
+            // Force at once; its state line is the warning.
+            Button(shownBusy || gate.armed == .pause ? "Force Pause" : "Pause") {
+                if shownBusy { gate.clear(); model.pause(entry) } else { mainAction() }
+            }
+                .disabled(entry.neverFreeze)
+        case .paused:
+            Button("Resume", action: mainAction)
+        case .sleeping:
+            Button(waking ? "Waking..." : "Wake", action: mainAction).disabled(waking)
+        }
+        if entry.canDeepSleep {
+            Button(shownBusy || gate.armed == .deepSleep ? "Force Deep Sleep" : "Deep Sleep") {
+                if shownBusy { gate.clear(); deepSleepConfirmed() } else { deepSleepTapped() }
+            }
+        }
+        if entry.state != .sleeping {
+            Divider()
+            Button("Auto-pause...") { showDetail = true }
+            if let id = entry.bundleID, !id.isEmpty {
+                Toggle("Never freeze", isOn: Binding(
+                    get: { entry.neverFreeze },
+                    set: { on in
+                        if on { model.neverFreeze.append(id) } else { model.neverFreeze.removeAll { $0 == id } }
+                    }))
+            }
+        }
     }
 
-    private var forceHelp: String { "\(gate.text ?? "Busy"). Click again to proceed anyway." }
+    /// Pause, Resume or Wake, for the button and the context menu alike.
+    private func mainAction() {
+        if entry.state == .running {
+            gate.check(.pause, entry: entry, model: model) { model.pause(entry) }
+        } else {
+            model.resume(entry)
+        }
+    }
+
+    private func deepSleepTapped() {
+        gate.check(.deepSleep, entry: entry, model: model) { deepSleepConfirmed() }
+    }
+
+    private func deepSleepConfirmed() {
+        // The seen flag only covers apps that restore their windows; for the rest
+        // the warning is the only notice that windows may be lost.
+        if PauseFlags.hasSeenDeepSleepWarning,
+           DeepSleepController.canRestoreState(bundleID: entry.bundleID).kind == .good {
+            model.deepSleep(entry)
+        } else {
+            showSleepWarning = true
+        }
+    }
+
+    private var shownBusy: Bool {
+        entry.pid.flatMap { model.appStates[$0] }.map { !$0.busy.isEmpty } ?? false
+    }
 
     @ViewBuilder
     private var badge: some View {
@@ -396,34 +469,23 @@ private struct AppRow: View {
         case .running:
             if AppSettingsStore.shared.settings(for: entry.bundleID).autoPauseEnabled {
                 Image(systemName: "timer").font(.system(size: 8)).foregroundStyle(.secondary)
+                    .help("Auto-pause is on")
             }
         case .paused:
-            tag("FROZEN", .blue)
+            stateTag("PAUSED", .blue)
         case .sleeping:
-            tag("SLEEPING", .indigo)
+            stateTag("ASLEEP", .indigo)
         }
     }
 
-    private func tag(_ text: String, _ color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 8, weight: .bold))
-            .padding(.horizontal, 4)
-            .padding(.vertical, 1)
-            .background(color.opacity(0.2), in: Capsule())
-            .foregroundStyle(color)
-    }
-
-    /// Primary number is resident RAM — the memory actually held right now, which drops
-    /// when an app is frozen. Footprint is shown dimmer because it counts compressed and
-    /// swapped pages and so barely moves.
+    /// Resident RAM only: the memory held right now, which drops when an app is paused.
+    /// Footprint barely moves (it counts compressed and swapped pages); the detail view has it.
     private var memoryLine: some View {
         HStack(spacing: 5) {
             if entry.state == .sleeping {
-                Text("quit — 0 bytes held").font(.system(size: 10))
+                Text("Quit, relaunches on Wake").font(.system(size: 10))
             } else {
                 Text(MenuView.fmt(entry.resident)).font(.system(size: 10)).monospacedDigit()
-                Text(MenuView.fmt(entry.footprint))
-                    .font(.system(size: 9)).monospacedDigit().foregroundStyle(.tertiary)
             }
             if entry.frozenWindows > 0 {
                 Text(entry.windowCount.map { "\(entry.frozenWindows) of \($0) windows paused" }
@@ -440,23 +502,6 @@ private struct AppRow: View {
         .foregroundStyle(.secondary)
     }
 
-    /// Busy or idle as of the last live pass, or the Force step's findings.
-    @ViewBuilder
-    private var stateLine: some View {
-        let state = entry.pid.flatMap { model.appStates[$0] }
-        Group {
-            if let text = gate.text {
-                Text(text).foregroundStyle(.orange)
-            } else if let state {
-                Text(state.text()).foregroundStyle(state.busy.isEmpty ? .secondary : Color.orange)
-            } else {
-                Text("Checking...").foregroundStyle(.tertiary)
-            }
-        }
-        .font(.system(size: 9))
-        .lineLimit(1).truncationMode(.tail)
-    }
-
     private var rowTint: Color {
         switch entry.state {
         case .running: return .clear
@@ -467,10 +512,67 @@ private struct AppRow: View {
 
     private var actionHelp: String {
         switch entry.state {
-        case .running: return "Pause \(entry.name) — freeze it, keep it in memory"
+        case .running: return "Pause \(entry.name): stop it, keep it in memory"
         case .paused: return "Resume \(entry.name)"
-        case .sleeping: return "Wake \(entry.name) — relaunch and restore its windows"
+        case .sleeping: return "Wake \(entry.name): relaunch it and restore its windows"
         }
+    }
+}
+
+private func stateTag(_ text: String, _ color: Color) -> some View {
+    Text(text)
+        .font(.system(size: 8, weight: .bold))
+        .padding(.horizontal, 4)
+        .padding(.vertical, 1)
+        .background(color.opacity(0.2), in: Capsule())
+        .foregroundStyle(color)
+}
+
+/// Busy or idle as of the last live pass, or the Force step's findings. Busy carries an
+/// hourglass, not a warning color: orange is kept for Force and warnings.
+private func liveStateLine(gateText: String?, state: LiveState?, placeholder: String) -> some View {
+    Group {
+        if let busy = gateText ?? (state?.busy.isEmpty == false ? state?.busyText : nil) {
+            Label(busy, systemImage: "hourglass").help(busy)
+        } else if let state {
+            Text(state.text())
+        } else {
+            Text(placeholder)
+        }
+    }
+    .font(.system(size: 9))
+    .foregroundStyle(.secondary)
+    .lineLimit(1).truncationMode(.tail)
+}
+
+/// A Pause or Deep Sleep button that turns into Force while `gate` is armed for its action,
+/// the same in app rows, window rows and the detail popover.
+struct GatedButton<Content: View>: View {
+    @ObservedObject var gate: BusyGate
+    let action: BusyGate.Action
+    let help: String
+    let voiceOver: String
+    let perform: () -> Void
+    @ViewBuilder let label: () -> Content
+
+    private var armed: Bool { gate.armed == action }
+
+    var body: some View {
+        Button(action: perform) {
+            if armed {
+                Label("Force", systemImage: action == .pause ? "pause.fill" : "moon.zzz.fill")
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.orange, in: Capsule())
+                    .foregroundStyle(.white)
+            } else {
+                label()
+            }
+        }
+        .buttonStyle(.plain)
+        .help(armed ? "\(gate.text ?? "Busy"). Click again to proceed anyway." : help)
+        .accessibilityLabel(armed ? "Force: \(voiceOver)" : voiceOver)
     }
 }
 
@@ -605,7 +707,7 @@ private struct ProcessLine: View {
                 Text(role).lineLimit(1).foregroundStyle(.tertiary)
             }
             if process.stopped {
-                Image(systemName: "pause.fill").foregroundStyle(.blue).help("Frozen")
+                Image(systemName: "pause.fill").foregroundStyle(.blue).help("Paused")
             }
             Spacer(minLength: 4)
             totals(resident: process.resident, cpu: process.cpuPercent)
@@ -626,7 +728,10 @@ private struct WindowSection: View {
         HStack(spacing: 6) {
             Image(systemName: "macwindow").font(.system(size: 9)).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(window.title).font(.system(size: 10, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                HStack(spacing: 4) {
+                    Text(window.title).font(.system(size: 10, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                    if window.frozen { stateTag("PAUSED", .blue) }
+                }
                 stateLine
             }
             Spacer(minLength: 4)
@@ -634,6 +739,15 @@ private struct WindowSection: View {
             button
         }
         .frame(height: AppDetail.windowHeaderHeight)
+        .contentShape(Rectangle())
+        .contextMenu {
+            if window.frozen {
+                Button("Resume", action: resume)
+            } else if !entry.neverFreeze {
+                Button(gate.armed == .pause ? "Force Pause" : "Pause", action: pause)
+                    .disabled(!Accessibility.isTrusted)
+            }
+        }
         .onHover { if !$0 { gate.clear() } }
     }
 
@@ -643,53 +757,41 @@ private struct WindowSection: View {
 
     @ViewBuilder
     private var stateLine: some View {
-        Group {
-            if let text = gate.text {
-                Text(text).foregroundStyle(.orange)
-            } else if gate.checking {
-                Text("Checking...").foregroundStyle(.secondary)
-            } else if window.frozen || entry.neverFreeze {
-                EmptyView()
-            } else if let state {
-                Text(state.text()).foregroundStyle(state.busy.isEmpty ? .secondary : Color.orange)
-            } else {
-                Text("Checking...").foregroundStyle(.tertiary)
-            }
+        if gate.checking {
+            liveStateLine(gateText: nil, state: nil, placeholder: "Checking...")
+        } else if gate.text != nil || !(window.frozen || entry.neverFreeze) {
+            liveStateLine(gateText: gate.text, state: state, placeholder: "Checking...")
         }
-        .font(.system(size: 9))
-        .lineLimit(1).truncationMode(.tail)
     }
+
+    private func pause() {
+        let pids = window.processes.map(\.pid)
+        gate.check(.pause, shown: state, findings: { await model.busyFindings(pids: pids) }) {
+            await model.pauseWindow(entry, window: window.id)
+        }
+    }
+
+    private func resume() { model.resumeWindow(entry, window: window.id) }
 
     @ViewBuilder
     private var button: some View {
         if window.frozen {
-            Button { model.resumeWindow(entry, window: window.id) } label: {
+            Button(action: resume) {
                 Image(systemName: "play.circle.fill").font(.system(size: 15)).foregroundStyle(.green)
             }
             .buttonStyle(.plain)
             .help("Resume this window")
+            .accessibilityLabel("Resume window \(window.title)")
         } else if !entry.neverFreeze {
             let trusted = Accessibility.isTrusted
-            let pids = window.processes.map(\.pid)
-            Button {
-                gate.check(.pause, shown: state, findings: { await model.busyFindings(pids: pids) }) {
-                    await model.pauseWindow(entry, window: window.id)
-                }
-            } label: {
-                if gate.armed == .pause {
-                    Text("Force").font(.system(size: 10, weight: .medium))
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(Color.orange, in: Capsule()).foregroundStyle(.white)
-                } else {
-                    Image(systemName: "pause.circle.fill").font(.system(size: 15))
-                        .foregroundStyle(trusted ? .blue : .gray)
-                }
+            GatedButton(gate: gate, action: .pause,
+                        help: trusted ? "Pause this window"
+                            : "Needs Accessibility (Settings): without it a paused window would only resume from here, not when clicked",
+                        voiceOver: "Pause window \(window.title)", perform: pause) {
+                Image(systemName: "pause.circle.fill").font(.system(size: 15))
+                    .foregroundStyle(trusted ? .blue : .gray)
             }
-            .buttonStyle(.plain)
             .disabled(!trusted)
-            .help(!trusted
-                  ? "Needs Accessibility (Settings): without it a paused window would only resume from here, not when clicked"
-                  : gate.armed == .pause ? "\(gate.text ?? "Busy"). Click again to proceed anyway." : "Pause this window")
         }
     }
 }

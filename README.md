@@ -51,18 +51,27 @@ no telemetry, and no paid tier. There is nothing to buy.
 
 Two sections:
 
-- **Suspended (top)** — Messages, Mail, Calendar and TextEdit are `FROZEN`, each with a green
-  button to bring them straight back. They pin to the top so a frozen app is never lost.
-- **Apps** — running apps sorted by the RAM they actually hold, each with a live sparkline and
-  buttons to Pause (⏸), Deep Sleep (🌙) or open details.
+- **Paused / Asleep (top)** - paused apps are tagged `PAUSED`, deep-slept ones `ASLEEP`
+  ("Quit, relaunches on Wake"), each with a button to bring them straight back (Wake shows
+  "Waking..." while the app relaunches). They pin to the top so a paused app is never lost.
+- **Apps** - running apps sorted by the RAM they actually hold, each with a live sparkline and,
+  at the right edge of every row in the same order: details and auto-pause, Deep Sleep and
+  Pause.
+
+While the pointer is over the list, rows stay where they are, so a row that was just paused does
+not move away under the next click; the list re-sorts when the pointer leaves. Right-clicking a
+row offers Pause or Resume, Deep Sleep or Wake, "Auto-pause..." and a "Never freeze" toggle
+(window rows: Pause or Resume). A pause that is refused, or a wake that fails, always leaves a
+notice above the list: warnings in orange, confirmations in green.
 
 The footer holds **Free Up Memory**, **Resume All** (paused apps and windows), **Wake all**
 (relaunches deep-slept apps, shown only while there are any), the gear that opens the
 Settings window (also Cmd-, while the panel is open) and quit.
 
-Look at the frozen **Mail** row: `9.5 MB` resident against `399.9 MB` footprint. Mail is holding
-9.5 MB of real RAM — the other ~390 MB has already been compressed or swapped out. That gap is
-exactly what tools showing only Activity Monitor's footprint number hide from you.
+Rows show resident memory, the RAM an app holds right now. The details popover adds the
+footprint: a paused Mail at "9.5 MB in RAM, 399.9 MB footprint" holds 9.5 MB of real RAM; the
+other ~390 MB has already been compressed or swapped out. That gap is exactly what tools
+showing only Activity Monitor's footprint number hide from you.
 
 ### Free Up Memory — review, then confirm
 
@@ -78,7 +87,7 @@ confirm button.**
 - **Auto Pause itself is never listed**, and refuses to freeze any process tree containing
   itself — at the signal layer, not just in the selection logic.
 - Apps on the **Never freeze** list (Finder, System Settings, password managers, VPN
-  clients, VM hosts, ...) are never listed.
+  clients, VM hosts, ...) are never listed; the header says "N apps not offered (Never freeze)".
 - **Busy apps** (playing audio, running `git` or a build, computing, ...) start **unticked**
   with the reason shown, e.g. *"Busy: playing audio"*. Ticking one pauses it anyway.
 - **Recording and call apps** (QuickTime, OBS, ScreenFlow, Loom, Zoom, Teams, Meet, Discord,
@@ -118,8 +127,8 @@ set per app.
 
 ![TextEdit detail popover showing the app frozen at 22.9 MB in RAM of 58.8 MB total with a Resume button](docs/screenshots/frozen-app.png)
 
-A frozen app keeps its row and its numbers — TextEdit sits at **22.9 MB in RAM · 58.8 MB
-total** — and one click resumes it exactly where it was. Nothing is closed, nothing is lost.
+A paused app keeps its row and its numbers - TextEdit sits at **22.9 MB in RAM, 58.8 MB
+footprint** - and one click resumes it exactly where it was. Nothing is closed, nothing is lost.
 
 ---
 
@@ -338,13 +347,14 @@ An app counts as busy when anything in its process tree is:
   still counts as idle.
 
 While the panel is open, every app row and every window row shows its state under the memory
-line, updated every 3 seconds: busy (*"Busy: in use, git fetch"*, in orange; "in use" is the
+line, updated every 3 seconds: busy (*"Busy: in use, git fetch"* with an hourglass; "in use" is the
 frontmost app or the focused window of the frontmost app) or idle (*"Idle 12 min"*, plus
 *"pauses in 3 min"* when auto-pause is on). Nothing is sampled for it while the panel is closed.
 
 Busy apps are never auto-paused. Clicking Pause or Deep Sleep on a row shown busy shows what is
-still running and turns the button into an orange **Force**; a second click within 5 seconds
-goes ahead. A row shown idle acts at once. Right after the panel opens, before a state is
+still running (in the state line and the button tooltip) and turns the button into an orange
+**Force**, the same in app rows, window rows and the details popover; a second click within 5
+seconds goes ahead. A row shown idle acts at once. Right after the panel opens, before a state is
 shown, the click checks first. Resume and Wake never ask.
 
 Each condition can be switched off in **Settings > Busy Conditions**, along with the CPU threshold
@@ -355,7 +365,7 @@ saved). All checks use public APIs and need no permission.
 
 Some apps break the Mac when frozen. Apps on the **Never freeze** list are never paused: not
 automatically, not by Free Up Memory, not by hand and not per window, and there is no Force.
-Their row shows a lock instead of Pause and no busy or idle state. Deep Sleep (a normal quit)
+Their row shows a lock icon instead of Pause and no busy or idle state. Deep Sleep (a normal quit)
 stays available. The defaults: Finder, System Settings, Screen Sharing, Activity Monitor,
 Passwords, 1Password, Bitwarden, KeePassXC, GlobalProtect, Tunnelblick, WireGuard, UTM, Docker
 Desktop, Parallels Desktop and VMware Fusion. **Settings > Never Freeze** lists them with name

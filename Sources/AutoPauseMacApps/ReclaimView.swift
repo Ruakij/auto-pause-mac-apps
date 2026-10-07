@@ -93,7 +93,7 @@ struct ReclaimView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 9) {
-                Image(systemName: "cpu.fill").font(.system(size: 20)).foregroundStyle(.teal)
+                Image(systemName: "memorychip").font(.system(size: 20)).foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Free Up Memory").font(.system(size: 14, weight: .semibold))
                     Text("Review what gets paused, then confirm")
@@ -106,6 +106,11 @@ struct ReclaimView: View {
                 Text("Untick anything you're using. Busy, recording and call apps start unticked. Nothing is paused until you press the button.")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            let neverFreeze = model.entries.filter { $0.state == .running && $0.neverFreeze }.count
+            if neverFreeze > 0 {
+                Label("\(neverFreeze) app\(neverFreeze == 1 ? "" : "s") not offered (Never freeze)", systemImage: "lock.fill")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 13)
@@ -137,7 +142,7 @@ struct ReclaimView: View {
             HStack(spacing: 9) {
                 Image(systemName: isOn ? "checkmark.square.fill" : "square")
                     .font(.system(size: 14))
-                    .foregroundStyle(isOn ? .teal : .secondary)
+                    .foregroundStyle(isOn ? Color.accentColor : .secondary)
                 if let icon = entry.icon {
                     Image(nsImage: icon).resizable().frame(width: 20, height: 20)
                         .opacity(isOn ? 1 : 0.45)
@@ -150,7 +155,7 @@ struct ReclaimView: View {
                     if let findings = busy?[entry.id] {
                         Label("Busy: \(findings.summary)", systemImage: "hourglass")
                             .font(.system(size: 9))
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                     } else if isCaptureApp(entry) {
                         Label("may be recording or in a call", systemImage: "record.circle")
@@ -166,7 +171,7 @@ struct ReclaimView: View {
             .padding(.horizontal, 7)
             .padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: 7)
-                .fill(isOn ? Color.teal.opacity(0.08) : .clear))
+                .fill(isOn ? Color.accentColor.opacity(0.08) : .clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -201,7 +206,7 @@ struct ReclaimView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack {
-                Text(freeing > 0 ? "Frees about \(MenuView.fmt(freeing))" : "Nothing selected")
+                Text(freeing > 0 ? "Up to \(MenuView.fmt(freeing)) reclaimable" : "Nothing selected")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(freeing > 0 ? .primary : .secondary)
                 Spacer()
@@ -217,7 +222,6 @@ struct ReclaimView: View {
                     onDone()
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.teal)
                 .disabled(chosen.isEmpty || busy == nil)
             }
         }

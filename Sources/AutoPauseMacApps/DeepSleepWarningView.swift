@@ -24,7 +24,7 @@ struct DeepSleepWarningView: View {
                 }
             }
 
-            Text("Deep Sleep **actually quits** the app, unlike Pause which just freezes it. "
+            Text("Deep Sleep **actually quits** the app, unlike Pause, which only stops it. "
                  + "That releases 100% of its memory instead of only part of it. "
                  + "Waking it relaunches the app and restores your windows.")
                 .font(.caption)
