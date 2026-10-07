@@ -112,8 +112,8 @@ final class AppListModel: ObservableObject {
     /// Bumped when the panel opens or closes, so a pass of an earlier opening is dropped.
     private var livePassGeneration = 0
     /// Frontmost app as last reported by activation notifications; `isActive` of an app that
-    /// just deactivated can still read true.
-    private var frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    /// just deactivated can still read true. Published because rows disable Pause for it.
+    @Published private(set) var frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
     private var observers: [NSObjectProtocol] = []
 
     init() {
@@ -490,11 +490,17 @@ final class AppListModel: ObservableObject {
         bundleID.map(neverFreeze.contains) ?? false
     }
 
+    func isFrontmost(_ pid: pid_t?) -> Bool {
+        pid != nil && pid == frontPid
+    }
+
     /// The one place anything is frozen: a manual Pause, auto-pause and Free Up Memory.
-    /// Apps on the Never freeze list are refused here, with no Force. `pauseTree` keeps its own guard
-    /// against freezing this process.
+    /// Apps on the Never freeze list and the frontmost app are refused here, with no Force:
+    /// activating a frozen app is what thaws it, and the frontmost app gets no activation when
+    /// clicked, so it would stay frozen. `pauseTree` keeps its own guard against freezing this
+    /// process.
     private func freeze(root: pid_t, bundleID: String?) -> Bool {
-        guard !isNeverFreeze(bundleID) else { return false }
+        guard !isNeverFreeze(bundleID), !isFrontmost(root) else { return false }
         return ProcessControl.pauseTree(root: root)
     }
 
@@ -507,6 +513,8 @@ final class AppListModel: ObservableObject {
             footprintAtPause[pid] = nil
             notice = Notice(text: isNeverFreeze(entry.bundleID)
                 ? "\(entry.name) is on the Never freeze list and was not paused."
+                : isFrontmost(pid)
+                ? "\(entry.name) is in use and was not paused. Switch to another app to pause it."
                 : "\(entry.name) could not be paused: it has quit, or Auto Pause runs inside it.",
                 isWarning: true)
             return

@@ -96,7 +96,9 @@ struct AppDetailView: View {
                 Spacer()
                 if !(entry.state == .running && entry.neverFreeze) {
                     let running = entry.state == .running
-                    GatedButton(gate: gate, action: .pause, help: "\(running ? "Pause" : "Resume") \(entry.name)",
+                    let inUse = running && model.isFrontmost(entry.pid)
+                    GatedButton(gate: gate, action: .pause,
+                                help: inUse ? inUseHelp : "\(running ? "Pause" : "Resume") \(entry.name)",
                                 voiceOver: "\(running ? "Pause" : "Resume") \(entry.name)") {
                         if running {
                             gate.check(.pause, entry: entry, model: model) { model.pause(entry) }
@@ -108,6 +110,9 @@ struct AppDetailView: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(running ? .blue : .green)
                     }
+                    .disabled(inUse)
+                    // A plain button keeps its colors when disabled.
+                    .opacity(inUse ? 0.35 : 1)
                 }
             }
         }

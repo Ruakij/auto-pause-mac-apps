@@ -62,7 +62,11 @@ While the pointer is over the list, rows stay where they are, so a row that was 
 not move away under the next click; the list re-sorts when the pointer leaves. Right-clicking a
 row offers Pause or Resume, Deep Sleep or Wake, "Auto-pause..." (not for apps on the Never
 freeze list) and a "Never freeze" toggle.
-A pause that is refused, or a wake that fails, always leaves a
+The app in use (frontmost) cannot be paused: its Pause button is disabled ("In use: switch to
+another app to pause it") and its menu offers no Pause, because bringing a paused app to the
+front is what resumes it, and clicking the app already in front does not. Deep Sleep stays
+available. While the Settings window is open, Auto Pause itself is in front, so every app can be
+paused. A pause that is refused, or a wake that fails, always leaves a
 notice above the list: warnings in orange, confirmations in green.
 
 The footer holds **Free Up Memory**, **Resume All** (paused apps), **Wake all**

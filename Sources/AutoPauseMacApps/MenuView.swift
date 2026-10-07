@@ -373,13 +373,16 @@ private struct AppRow: View {
                     .help("On the Never freeze list")
                     .accessibilityLabel("\(entry.name) is on the Never freeze list")
             } else {
-                GatedButton(gate: gate, action: .pause, help: actionHelp,
+                GatedButton(gate: gate, action: .pause, help: inUse ? inUseHelp : actionHelp,
                             voiceOver: "\(entry.state == .running ? "Pause" : "Resume") \(entry.name)",
                             perform: mainAction) {
                     Image(systemName: entry.state == .running ? "pause.circle.fill" : "play.circle.fill")
                         .font(.system(size: 20))
                         .foregroundStyle(entry.state == .running ? .blue : .green)
                 }
+                .disabled(inUse)
+                // A plain button keeps its colors when disabled.
+                .opacity(inUse ? 0.35 : 1)
             }
         }
         .padding(.horizontal, 8)
@@ -398,10 +401,12 @@ private struct AppRow: View {
         case .running:
             // A menu closing outside the row resets the gate, so a row shown busy offers
             // Force at once; its state line is the warning.
-            Button(shownBusy || gate.armed == .pause ? "Force Pause" : "Pause") {
-                if shownBusy { gate.clear(); model.pause(entry) } else { mainAction() }
+            if !inUse {
+                Button(shownBusy || gate.armed == .pause ? "Force Pause" : "Pause") {
+                    if shownBusy { gate.clear(); model.pause(entry) } else { mainAction() }
+                }
+                    .disabled(entry.neverFreeze)
             }
-                .disabled(entry.neverFreeze)
         case .paused:
             Button("Resume", action: mainAction)
         case .sleeping:
@@ -450,6 +455,9 @@ private struct AppRow: View {
             showSleepWarning = true
         }
     }
+
+    /// The frontmost app cannot be paused; see `AppListModel.freeze`.
+    private var inUse: Bool { entry.state == .running && model.isFrontmost(entry.pid) }
 
     private var shownBusy: Bool {
         entry.pid.flatMap { model.appStates[$0] }.map { !$0.busy.isEmpty } ?? false
@@ -504,6 +512,8 @@ private struct AppRow: View {
         }
     }
 }
+
+let inUseHelp = "In use: switch to another app to pause it"
 
 private func stateTag(_ text: String, _ color: Color) -> some View {
     Text(text)
