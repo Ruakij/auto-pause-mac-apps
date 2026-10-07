@@ -35,8 +35,7 @@ struct MenuView: View {
                 // An explicit height, not maxHeight: a ScrollView has no intrinsic size, so
                 // the MenuBarExtra window would collapse it.
                 .frame(height: listHeight(sections: [top.count, apps.count],
-                                          stateLines: model.entries.filter(\.showsState).count)
-                       + model.entries.compactMap { $0.pid.flatMap { model.details[$0] }?.height }.reduce(0, +))
+                                          stateLines: model.entries.filter(\.showsState).count))
                 .onHover { inside in
                     pinned = inside ? (top.map(Self.pinKey), apps.map(Self.pinKey)) : nil
                 }
@@ -177,7 +176,7 @@ struct MenuView: View {
                 ReclaimView(model: model) { showReclaim = false }
             }
             Spacer()
-            let resumable = model.entries.filter { $0.state == .paused }.count + model.frozenWindowCount
+            let resumable = model.entries.filter { $0.state == .paused }.count
             Button {
                 model.resumeAll()
             } label: {
@@ -265,16 +264,7 @@ private struct AppRow: View {
     @StateObject private var gate = BusyGate()
 
     var body: some View {
-        VStack(spacing: 0) {
-            row
-            if let pid = entry.pid, let detail = model.details[pid] {
-                ProcessListView(entry: entry, detail: detail, model: model)
-                    .padding(.leading, 30)
-                    .padding(.trailing, 8)
-                    .padding(.bottom, 6)
-            }
-        }
-        .background(
+        row.background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(hovering ? Color.primary.opacity(0.06) : rowTint)
         )
@@ -284,22 +274,6 @@ private struct AppRow: View {
 
     private var row: some View {
         HStack(spacing: 8) {
-            if let pid = entry.pid {
-                let expanded = model.expanded.contains(pid)
-                Button { model.toggleExpanded(pid) } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
-                        .frame(width: 10)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Processes")
-                .accessibilityLabel("\(expanded ? "Hide" : "Show") processes of \(entry.name)")
-            } else {
-                Color.clear.frame(width: 10)
-            }
             if let icon = entry.icon {
                 Image(nsImage: icon)
                     .resizable()
@@ -323,7 +297,7 @@ private struct AppRow: View {
                 memoryLine
                 if entry.showsState || gate.text != nil {
                     // A blank line until the first pass, so the row keeps its height.
-                    liveStateLine(gateText: gate.text, state: entry.pid.flatMap { model.appStates[$0] }, placeholder: " ")
+                    liveStateLine(gateText: gate.text, state: entry.pid.flatMap { model.appStates[$0] })
                 }
             }
 
@@ -493,12 +467,6 @@ private struct AppRow: View {
             } else {
                 Text(MenuView.fmt(entry.resident)).font(.system(size: 10)).monospacedDigit()
             }
-            if entry.frozenWindows > 0 {
-                Text(entry.windowCount.map { "\(entry.frozenWindows) of \($0) windows paused" }
-                     ?? "\(entry.frozenWindows) window\(entry.frozenWindows == 1 ? "" : "s") paused")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.blue)
-            }
             if entry.reclaimedBytes > 0 {
                 Text("freed \(MenuView.fmt(entry.reclaimedBytes))")
                     .font(.system(size: 9, weight: .medium))
@@ -536,14 +504,14 @@ private func stateTag(_ text: String, _ color: Color) -> some View {
 
 /// Busy or idle as of the last live pass, or the Force step's findings. Busy carries an
 /// hourglass, not a warning color: orange is kept for Force and warnings.
-private func liveStateLine(gateText: String?, state: LiveState?, placeholder: String) -> some View {
+private func liveStateLine(gateText: String?, state: LiveState?) -> some View {
     Group {
         if let busy = gateText ?? (state?.busy.isEmpty == false ? state?.busyText : nil) {
             Label(busy, systemImage: "hourglass").help(busy)
         } else if let state {
             Text(state.text())
         } else {
-            Text(placeholder)
+            Text(" ")
         }
     }
     .font(.system(size: 9))
@@ -552,7 +520,7 @@ private func liveStateLine(gateText: String?, state: LiveState?, placeholder: St
 }
 
 /// A Pause or Deep Sleep button that turns into Force while `gate` is armed for its action,
-/// the same in app rows, window rows and the detail popover.
+/// the same in app rows and the detail popover.
 struct GatedButton<Content: View>: View {
     @ObservedObject var gate: BusyGate
     let action: BusyGate.Action
@@ -645,159 +613,4 @@ final class BusyGate: ObservableObject {
 extension AppEntry {
     /// Rows that can be paused show busy or idle under the memory line.
     var showsState: Bool { state == .running && !neverFreeze }
-}
-
-extension AppDetail {
-    static let processLineHeight: CGFloat = 15
-    static let windowHeaderHeight: CGFloat = 30
-
-    /// Height of the expanded part of a row, from fixed line metrics like `listHeight`.
-    var height: CGFloat {
-        let lines: CGFloat
-        if let windows {
-            lines = CGFloat(windows.count + 1) * Self.windowHeaderHeight
-                + CGFloat(windows.reduce(0) { $0 + $1.processes.count } + shared.count) * Self.processLineHeight
-        } else {
-            lines = CGFloat(processes.count) * Self.processLineHeight
-        }
-        return lines + 6
-    }
-}
-
-/// The expanded part of an app row: windows with their processes and the shared rest, or the
-/// plain process tree. Only windows can be paused; processes are view-only.
-private struct ProcessListView: View {
-    let entry: AppEntry
-    let detail: AppDetail
-    @ObservedObject var model: AppListModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let windows = detail.windows {
-                ForEach(windows) { window in
-                    WindowSection(entry: entry, window: window, model: model)
-                    ForEach(window.processes) { ProcessLine(process: $0) }
-                }
-                HStack(spacing: 6) {
-                    Text("Shared").font(.system(size: 10, weight: .semibold))
-                    Spacer()
-                    totals(resident: detail.shared.reduce(0) { $0 + $1.resident },
-                           cpu: detail.shared.compactMap(\.cpuPercent).reduce(0, +))
-                }
-                .help("Serves every window, so it is never paused per window")
-                .frame(height: AppDetail.windowHeaderHeight)
-                ForEach(detail.shared) { ProcessLine(process: $0) }
-            } else {
-                ForEach(detail.processes) { ProcessLine(process: $0) }
-            }
-        }
-    }
-}
-
-private func totals(resident: UInt64, cpu: Double?) -> some View {
-    HStack(spacing: 6) {
-        Text(cpu.map { String(format: "%.1f%%", $0) } ?? "-").frame(width: 44, alignment: .trailing)
-        Text(MenuView.fmt(resident)).frame(width: 56, alignment: .trailing)
-    }
-    .font(.system(size: 9)).monospacedDigit().foregroundStyle(.secondary)
-}
-
-private struct ProcessLine: View {
-    let process: ProcessStat
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Text(process.name).lineLimit(1).truncationMode(.middle)
-                .padding(.leading, CGFloat(min(process.depth, 6)) * 8)
-            if let role = process.role, role != process.name {
-                Text(role).lineLimit(1).foregroundStyle(.tertiary)
-            }
-            if process.stopped {
-                Image(systemName: "pause.fill").foregroundStyle(.blue).help("Paused")
-            }
-            Spacer(minLength: 4)
-            totals(resident: process.resident, cpu: process.cpuPercent)
-        }
-        .font(.system(size: 9))
-        .foregroundStyle(.secondary)
-        .frame(height: AppDetail.processLineHeight)
-    }
-}
-
-private struct WindowSection: View {
-    let entry: AppEntry
-    let window: WindowDetail
-    @ObservedObject var model: AppListModel
-    @StateObject private var gate = BusyGate()
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "macwindow").font(.system(size: 9)).foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 4) {
-                    Text(window.title).font(.system(size: 10, weight: .semibold)).lineLimit(1).truncationMode(.middle)
-                    if window.frozen { stateTag("PAUSED", .blue) }
-                }
-                stateLine
-            }
-            Spacer(minLength: 4)
-            totals(resident: window.resident, cpu: window.cpuPercent)
-            button
-        }
-        .frame(height: AppDetail.windowHeaderHeight)
-        .contentShape(Rectangle())
-        .contextMenu {
-            if window.frozen {
-                Button("Resume", action: resume)
-            } else if !entry.neverFreeze {
-                Button(gate.armed == .pause ? "Force Pause" : "Pause", action: pause)
-                    .disabled(!Accessibility.isTrusted)
-            }
-        }
-        .onHover { if !$0 { gate.clear() } }
-    }
-
-    private var state: LiveState? {
-        entry.pid.flatMap { model.windowStates[WindowKey(pid: $0, window: window.id)] }
-    }
-
-    @ViewBuilder
-    private var stateLine: some View {
-        if gate.checking {
-            liveStateLine(gateText: nil, state: nil, placeholder: "Checking...")
-        } else if gate.text != nil || !(window.frozen || entry.neverFreeze) {
-            liveStateLine(gateText: gate.text, state: state, placeholder: "Checking...")
-        }
-    }
-
-    private func pause() {
-        let pids = window.processes.map(\.pid)
-        gate.check(.pause, shown: state, findings: { await model.busyFindings(pids: pids) }) {
-            await model.pauseWindow(entry, window: window.id)
-        }
-    }
-
-    private func resume() { model.resumeWindow(entry, window: window.id) }
-
-    @ViewBuilder
-    private var button: some View {
-        if window.frozen {
-            Button(action: resume) {
-                Image(systemName: "play.circle.fill").font(.system(size: 15)).foregroundStyle(.green)
-            }
-            .buttonStyle(.plain)
-            .help("Resume this window")
-            .accessibilityLabel("Resume window \(window.title)")
-        } else if !entry.neverFreeze {
-            let trusted = Accessibility.isTrusted
-            GatedButton(gate: gate, action: .pause,
-                        help: trusted ? "Pause this window"
-                            : "Needs Accessibility (Settings): without it a paused window would only resume from here, not when clicked",
-                        voiceOver: "Pause window \(window.title)", perform: pause) {
-                Image(systemName: "pause.circle.fill").font(.system(size: 15))
-                    .foregroundStyle(trusted ? .blue : .gray)
-            }
-            .disabled(!trusted)
-        }
-    }
 }

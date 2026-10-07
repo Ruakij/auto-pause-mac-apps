@@ -147,13 +147,10 @@ enum ProcessControl {
         return false
     }
 
-    /// Resume the whole tree except the subtrees rooted at `keepStopped`. Children first,
-    /// parent last.
+    /// Resume the whole tree. Children first, parent last.
     @discardableResult
-    static func resumeTree(root: pid_t, keepStopped: [pid_t] = []) -> Bool {
-        let tree = processTree(root: root)
-        let kept = Set(keepStopped.filter { $0 != root }.flatMap { processTree(root: $0) })
-        for pid in tree.reversed() where pid != root && !kept.contains(pid) {
+    static func resumeTree(root: pid_t) -> Bool {
+        for pid in processTree(root: root).reversed() where pid != root {
             kill(pid, SIGCONT)
         }
         return kill(root, SIGCONT) == 0

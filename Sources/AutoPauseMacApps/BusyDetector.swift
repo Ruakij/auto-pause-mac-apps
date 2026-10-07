@@ -401,25 +401,17 @@ final class BusyEvaluator: @unchecked Sendable {
     private let detector = BusyDetector()
     private let queue = DispatchQueue(label: "BusyEvaluator", qos: .utility)
 
-    /// Findings per app tree (each root with its descendants), then per group (exactly those
-    /// pids, e.g. one window), in that order. Nil only without `waitForCPU`, see
-    /// `BusyDetector.findings(forTrees:settings:waitForCPU:minCPUWindow:)`.
-    func findings(roots: [pid_t], groups: [[pid_t]] = [], settings: BusySettings, waitForCPU: Bool = true,
+    /// Findings per app tree (each root with its descendants). Nil only without `waitForCPU`,
+    /// see `BusyDetector.findings(forTrees:settings:waitForCPU:minCPUWindow:)`.
+    func findings(roots: [pid_t], settings: BusySettings, waitForCPU: Bool = true,
                   minCPUWindow: TimeInterval = 0) async -> [[BusyFinding]?] {
         await withCheckedContinuation { cont in
             queue.async {
-                let trees = roots.map { ProcessControl.processTree(root: $0) } + groups
+                let trees = roots.map { ProcessControl.processTree(root: $0) }
                 cont.resume(returning: self.detector.findings(forTrees: trees, settings: settings,
                                                               waitForCPU: waitForCPU, minCPUWindow: minCPUWindow))
             }
         }
-    }
-
-    /// Findings over exactly these pids, e.g. one window group, as one tree.
-    func findings(pids: [pid_t], settings: BusySettings, waitForCPU: Bool = true,
-                  minCPUWindow: TimeInterval = 0) async -> [BusyFinding]? {
-        await findings(roots: [], groups: [pids], settings: settings, waitForCPU: waitForCPU,
-                       minCPUWindow: minCPUWindow)[0]
     }
 
     func systemBlockers() async -> [String] {

@@ -1,8 +1,8 @@
 import Foundation
 
-/// Persists which apps and windows are paused so a crash of Pause never strands frozen
-/// processes. A whole-app record holds the app pid; a window record holds one root of a window
-/// group (renderer, extension host, file watcher), whose tree was frozen with it.
+/// Persists which apps are paused so a crash of Pause never strands frozen processes.
+/// Records with `ownerPid` set are window records of builds that froze single windows; they are
+/// only decoded, resumed at launch and dropped (`AppListModel.resumeWindowRecords`).
 struct PausedRecord: Codable, Equatable {
     let pid: pid_t
     let bundleID: String?
@@ -12,8 +12,6 @@ struct PausedRecord: Codable, Equatable {
     let launchDate: Date?
     /// The app's main pid for window records; nil for a whole-app record.
     var ownerPid: pid_t? = nil
-    var windowId: Int? = nil
-    var windowTitle: String? = nil
 
     /// Still the process this record was made for.
     var isLive: Bool {
@@ -32,8 +30,6 @@ extension PausedRecord {
                   name: try c.decode(String.self, forKey: .name),
                   launchDate: try c.decodeIfPresent(Date.self, forKey: .launchDate))
         ownerPid = try c.decodeIfPresent(pid_t.self, forKey: .ownerPid) ?? ownerPid
-        windowId = try c.decodeIfPresent(Int.self, forKey: .windowId) ?? windowId
-        windowTitle = try c.decodeIfPresent(String.self, forKey: .windowTitle) ?? windowTitle
     }
 }
 
@@ -81,29 +77,10 @@ final class PausedStore {
         records.contains { $0.pid == pid && $0.ownerPid == nil }
     }
 
-    func windowRecords(owner: pid_t) -> [PausedRecord] {
-        records.filter { $0.ownerPid == owner }
-    }
-
-    /// Window records before whole-app records: a window group is a child of its app, and
-    /// children resume first.
-    var resumeOrder: [PausedRecord] {
-        records.filter { $0.ownerPid != nil } + records.filter { $0.ownerPid == nil }
-    }
-
     /// Drop records whose process is gone or was replaced (pid reuse guard via launch date).
-    /// A window group whose app is gone is resumed first: nothing else would ever wake it.
     func pruneStale(currentApps: [(pid: pid_t, launchDate: Date?)]) {
         let live = Dictionary(uniqueKeysWithValues: currentApps.map { ($0.pid, $0.launchDate) })
         records.removeAll { rec in
-            if let owner = rec.ownerPid {
-                guard rec.isLive else { return true }
-                guard AppProcesses.parentPid(of: rec.pid) == owner else {
-                    ProcessControl.resumeTree(root: rec.pid)
-                    return true
-                }
-                return false
-            }
             guard let launch = live[rec.pid] else { return true } // process gone
             if let recDate = rec.launchDate, let nowDate = launch ?? nil {
                 return abs(recDate.timeIntervalSince(nowDate)) > 2 // different process reusing pid

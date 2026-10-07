@@ -60,11 +60,11 @@ Two sections:
 
 While the pointer is over the list, rows stay where they are, so a row that was just paused does
 not move away under the next click; the list re-sorts when the pointer leaves. Right-clicking a
-row offers Pause or Resume, Deep Sleep or Wake, "Auto-pause..." and a "Never freeze" toggle
-(window rows: Pause or Resume). A pause that is refused, or a wake that fails, always leaves a
+row offers Pause or Resume, Deep Sleep or Wake, "Auto-pause..." and a "Never freeze" toggle.
+A pause that is refused, or a wake that fails, always leaves a
 notice above the list: warnings in orange, confirmations in green.
 
-The footer holds **Free Up Memory**, **Resume All** (paused apps and windows), **Wake all**
+The footer holds **Free Up Memory**, **Resume All** (paused apps), **Wake all**
 (relaunches deep-slept apps, shown only while there are any), the gear that opens the
 Settings window (also Cmd-, while the panel is open) and quit.
 
@@ -235,27 +235,6 @@ position, same undo history, same unsaved text.
 `Google Chrome Helper` processes. Freezing only the parent frees almost nothing, which is why
 naive "app pauser" scripts don't work on browsers.
 
-### Processes and single windows
-
-The chevron on each app row expands it into its process tree: every process with its role
-(Chromium `--type`, "main"), resident memory and CPU % since the previous refresh. The list is
-view-only and only expanded rows are sampled.
-
-VS Code, VS Code Insiders and VSCodium run a renderer, an extension host and a file watcher per
-window, so their expanded row is split into one section per window (title, summed memory and
-CPU, its processes) plus a **Shared** section (main process, GPU, network, terminals), which is
-never paused on its own. Each window has its own Pause: it freezes that window's processes,
-including its language servers and agents, while the other windows keep working. Pause checks
-the window for busy findings first, like the app buttons. The app row then reads e.g. "2 of 3
-windows paused". Clicking into a paused window resumes it; bringing the app to the front does
-not resume windows that were not clicked. An app cannot quit while one of its windows is
-paused, so its paused windows resume when Cmd-Q is pressed in it, when another of its windows
-closes, and at logout or shutdown. Windows are mapped with `code --status` (no
-permission); waking on click needs Accessibility, asked for on a page of the first-run
-walkthrough that explains window pausing (never at launch). Without it the window Pause button
-is disabled with a tooltip, and **Settings > General** shows the state with a button to System
-Settings > Privacy & Security > Accessibility.
-
 ### 🌙 Deep Sleep — free everything, including swap
 
 Quits the app the normal way — the same as pressing ⌘Q — so macOS and the app save state
@@ -305,8 +284,7 @@ that display only footprint make pausing look like it did nothing at all.
 
 Because the app has no Dock icon and no window, a menu-bar-only utility can vanish the moment
 you install it. A short animated walkthrough runs on first launch: what the two tiers do, how
-the Free Up Memory checklist works, window pausing in VS Code (with the button that asks for
-Accessibility), and an arrow pointing at where in the menu bar to find it, plus the option to
+the Free Up Memory checklist works, and an arrow pointing at where in the menu bar to find it, plus the option to
 start at login. You can reopen it any time from **Settings > General > Show the Walkthrough Again**.
 
 ### 🚀 Start at login
@@ -327,12 +305,6 @@ CPU 30 seconds later. While the camera is in use, screen sharing or Sidecar is a
 auto-paused. Bringing any frozen app to the front (Dock click, Cmd-Tab, `open -a`) thaws it,
 however it was frozen.
 
-VS Code-family apps with auto-pause on and Accessibility granted idle per window instead: each
-window has its own clock, counted from the moment it stopped being the focused window of the
-frontmost app, and only that window is frozen when it runs out (same minutes, busy check and
-retries). The focused window of the frontmost app is never frozen, and such an app is never
-auto-paused as a whole. Without Accessibility it is auto-paused as a whole app.
-
 ### Busy apps stay running
 
 An app counts as busy when anything in its process tree is:
@@ -348,14 +320,14 @@ An app counts as busy when anything in its process tree is:
   Claude Code tool calls. Idle language servers do not match, so an editor with nothing running
   still counts as idle.
 
-While the panel is open, every app row and every window row shows its state under the memory
-line, updated every 3 seconds: busy (*"Busy: in use, git fetch"* with an hourglass; "in use" is the
-frontmost app or the focused window of the frontmost app) or idle (*"Idle 12 min"*, plus
+While the panel is open, every app row shows its state under the memory line, updated every
+3 seconds: busy (*"Busy: in use, git fetch"* with an hourglass; "in use" is the frontmost app) or
+idle (*"Idle 12 min"*, plus
 *"pauses in 3 min"* when auto-pause is on). Nothing is sampled for it while the panel is closed.
 
 Busy apps are never auto-paused. Clicking Pause or Deep Sleep on a row shown busy shows what is
 still running (in the state line and the button tooltip) and turns the button into an orange
-**Force**, the same in app rows, window rows and the details popover; a second click within 5
+**Force**, the same in app rows and the details popover; a second click within 5
 seconds goes ahead. A row shown idle acts at once. Right after the panel opens, before a state is
 shown, the click checks first. Resume and Wake never ask.
 
@@ -366,7 +338,7 @@ saved). All checks use public APIs and need no permission.
 ### Never freeze
 
 Some apps break the Mac when frozen. Apps on the **Never freeze** list are never paused: not
-automatically, not by Free Up Memory, not by hand and not per window, and there is no Force.
+automatically, not by Free Up Memory and not by hand, and there is no Force.
 Their row shows a lock icon instead of Pause and no busy or idle state. Deep Sleep (a normal quit)
 stays available. The defaults: Finder, System Settings, Screen Sharing, Activity Monitor,
 Passwords, 1Password, Bitwarden, KeePassXC, GlobalProtect, Tunnelblick, WireGuard, UTM, Docker
@@ -401,11 +373,8 @@ right-click → Open no longer works — use System Settings → Privacy & Secur
 ### Does it need root, a password, or special permissions?
 
 No root, no password, no kernel extension, no entitlements. It uses Unix signals and Apple's
-public `libproc` APIs, which work on processes owned by the same user by design. The one
-permission it asks for is Accessibility, from the walkthrough page on window pausing and never at
-launch: it is only used to see which window of a
-VS Code-family app is focused, so a paused window resumes when clicked and windows idle on their
-own. Everything else works without it.
+public `libproc` APIs, which work on processes owned by the same user by design. It asks for no
+permission.
 
 ### Does pausing an app actually free RAM?
 
@@ -464,12 +433,9 @@ achievable equivalent.
 | System memory | `host_statistics64` + `sysctl vm.swapusage` |
 | Deep Sleep | `NSRunningApplication.terminate()` + macOS state restoration |
 | Wake | `NSWorkspace.openApplication` |
-| Per-window processes (VS Code family) | `code --status`, env and open-file fallback |
-| Window focus (thaw on click, per-window idle) | Accessibility `kAXFocusedWindowChangedNotification` |
 
 Apple's own guidance is to prefer `libproc` over `task_for_pid()`, which SIP restricts to
-development tools. That's why this needs no entitlements; the only prompt is Accessibility, for
-window focus.
+development tools. That's why this needs no entitlements and shows no permission prompt.
 
 📖 **[Full architecture — module by module →](docs/ARCHITECTURE.md)**
 
@@ -479,15 +445,6 @@ window focus.
 
 - A frozen app beachballs if you click it and shows "Not Responding" in Activity Monitor. Expected.
 - Don't freeze an app mid-call or mid-upload — network connections will drop.
-- A paused VS Code window keeps its terminals running: all terminals of all windows hang off one
-  shared process. Build daemons (Gradle and the like) detach and keep running too.
-- Clicking into a paused VS Code window that does not resume (no Accessibility, or a title that
-  no longer matches) shows a spinning cursor and, after a while, VS Code's "window is not
-  responding" dialog. "Reopen" there reloads the window and loses its state: resume it from the
-  panel instead.
-- A VS Code instance started with its own `--user-data-dir` is not split into windows.
-- Quitting VS Code from its menu or the Dock while its only window is paused hangs until that
-  window is resumed from the panel; Cmd-Q and multi-window quits resume it automatically.
 - Window-restore quality after Deep Sleep varies by app. Browsers use their own "Continue where
   you left off" setting instead of macOS's, and the app checks it for you.
 

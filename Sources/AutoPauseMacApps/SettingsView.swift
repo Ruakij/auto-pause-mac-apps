@@ -24,8 +24,6 @@ private struct GeneralSettingsView: View {
     let showOnboarding: () -> Void
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var loginError: String?
-    /// Re-read on activation: trust is granted in System Settings while this app runs.
-    @State private var trusted = Accessibility.isTrusted
 
     var body: some View {
         Form {
@@ -46,19 +44,7 @@ private struct GeneralSettingsView: View {
                     Button("Approve in System Settings...") { LaunchAtLogin.openLoginItemsSettings() }
                 }
             } footer: {
-                Text("Auto-pause and window thawing only work while Auto Pause runs.")
-            }
-
-            Section {
-                LabeledContent("Accessibility") {
-                    if trusted {
-                        Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                    } else {
-                        Button("Open System Settings...") { Accessibility.openSettings() }
-                    }
-                }
-            } footer: {
-                Text("Needed to pause single VS Code windows and to resume a paused window when it is clicked. Without it, Window Pause stays off.")
+                Text("Auto-pause and resuming an app when it is activated only work while Auto Pause runs.")
             }
 
             Section {
@@ -67,12 +53,6 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            launchAtLogin = LaunchAtLogin.isEnabled
-            trusted = Accessibility.isTrusted
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            trusted = Accessibility.isTrusted
-        }
+        .onAppear { launchAtLogin = LaunchAtLogin.isEnabled }
     }
 }
