@@ -71,7 +71,8 @@ notice above the list: warnings in orange, confirmations in green.
 
 The footer holds **Free Up Memory**, **Resume All** (paused apps), **Wake all**
 (relaunches deep-slept apps, shown only while there are any), the gear that opens the
-Settings window (also Cmd-, while the panel is open) and quit.
+Settings window (also Cmd-, while the panel is open) and quit. Settings and the walkthrough
+always open on the current Space, centered on the screen whose menu bar was clicked.
 
 Rows show resident memory, the RAM an app holds right now. The details popover adds the
 footprint: a paused Mail at "9.5 MB in RAM, 399.9 MB footprint" holds 9.5 MB of real RAM; the

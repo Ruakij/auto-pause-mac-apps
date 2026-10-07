@@ -17,7 +17,23 @@ struct SettingsView: View {
                 .tabItem { Label("Never Freeze", systemImage: "lock") }
         }
         .frame(width: 460)
+        .background(WindowAccessor())
     }
+}
+
+/// Hands the Settings window to `WindowPlacement` and places it when SwiftUI first creates it.
+private struct WindowAccessor: NSViewRepresentable {
+    final class AccessorView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, window !== WindowPlacement.settingsWindow else { return }
+            WindowPlacement.settingsWindow = window
+            WindowPlacement.present(window)
+        }
+    }
+
+    func makeNSView(context: Context) -> NSView { AccessorView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 private struct GeneralSettingsView: View {

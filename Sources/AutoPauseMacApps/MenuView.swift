@@ -201,12 +201,18 @@ struct MenuView: View {
                 // Activating the app below keeps the panel key, so nothing else would close it.
                 // dismiss is not reliable for MenuBarExtra windows; closing the key window (the
                 // panel while it is open) covers that.
+                // The panel's screen is the one whose menu bar was clicked; the pointer may be
+                // elsewhere for Cmd-,.
+                let screen = NSApp.keyWindow?.screen
                 dismiss()
                 NSApp.keyWindow?.close()
                 openSettings()
-                // An LSUIElement app is not active, so its Settings window would open behind
-                // the frontmost app.
-                NSApp.activate(ignoringOtherApps: true)
+                // The first open creates the window asynchronously; WindowAccessor places that one.
+                DispatchQueue.main.async {
+                    if let window = WindowPlacement.settingsWindow {
+                        WindowPlacement.present(window, on: screen)
+                    }
+                }
             } label: {
                 Image(systemName: "gearshape.fill")
             }
