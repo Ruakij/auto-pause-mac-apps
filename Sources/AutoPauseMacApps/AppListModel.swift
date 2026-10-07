@@ -370,7 +370,8 @@ final class AppListModel: ObservableObject {
     // MARK: - Auto-pause
 
     /// Rebuilds every auto-pause timer: on start, launch and termination, and when a setting
-    /// changes. Apps without auto-pause, the frontmost one and frozen ones get none.
+    /// changes. Never-freeze apps, apps without auto-pause, the frontmost one and frozen ones
+    /// get none.
     func rescheduleAutoPause() {
         let apps = listedApps()
         let livePids = Set(apps.map(\.processIdentifier))
@@ -388,10 +389,11 @@ final class AppListModel: ObservableObject {
     /// Arms the timer for `lastFrontDate + minutes`, or for `at` when re-checking a busy app.
     private func scheduleAutoPause(_ pid: pid_t, app: NSRunningApplication? = nil, at: Date? = nil) {
         cancelAutoPause(pid)
-        guard let app = app ?? NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+        guard let app = app ?? NSRunningApplication(processIdentifier: pid), !app.isTerminated,
+              !isNeverFreeze(app.bundleIdentifier) else { return }
         let settings = AppSettingsStore.shared.settings(for: app.bundleIdentifier)
         guard settings.autoPauseEnabled, app.activationPolicy == .regular, pid != frontPid,
-              !isNeverFreeze(app.bundleIdentifier), !ProcessControl.isStopped(pid), !PausedStore.shared.contains(pid: pid) else { return }
+              !ProcessControl.isStopped(pid), !PausedStore.shared.contains(pid: pid) else { return }
         if lastFrontDate[pid] == nil { lastFrontDate[pid] = app.launchDate ?? Date() }
         let due = at ?? lastFrontDate[pid]!.addingTimeInterval(TimeInterval(settings.autoPauseMinutes * 60))
         let timer = Timer(fire: max(due, Date()), interval: 0, repeats: false) { [weak self] _ in

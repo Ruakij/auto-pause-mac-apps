@@ -72,17 +72,21 @@ struct AppDetailView: View {
 
             Divider()
 
-            Toggle("Auto-pause when idle", isOn: $settings.autoPauseEnabled)
-                .toggleStyle(.switch)
-                .onChange(of: settings.autoPauseEnabled) { _, _ in save() }
-                .disabled(entry.neverFreeze)
-                .help(entry.neverFreeze ? "On the Never freeze list" : "")
+            // The stored setting is kept, so taking the app off the list brings it back.
+            if entry.neverFreeze {
+                Label("On the Never freeze list", systemImage: "lock.fill")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Toggle("Auto-pause when idle", isOn: $settings.autoPauseEnabled)
+                    .toggleStyle(.switch)
+                    .onChange(of: settings.autoPauseEnabled) { _, _ in save() }
 
-            if settings.autoPauseEnabled && !entry.neverFreeze {
-                Stepper("After \(settings.autoPauseMinutes) min in background",
-                        value: $settings.autoPauseMinutes, in: 1...180)
-                    .font(.caption)
-                    .onChange(of: settings.autoPauseMinutes) { _, _ in save() }
+                if settings.autoPauseEnabled {
+                    Stepper("After \(settings.autoPauseMinutes) min in background",
+                            value: $settings.autoPauseMinutes, in: 1...180)
+                        .font(.caption)
+                        .onChange(of: settings.autoPauseMinutes) { _, _ in save() }
+                }
             }
 
             HStack {
@@ -90,10 +94,7 @@ struct AppDetailView: View {
                     Label(busyText, systemImage: "hourglass").font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
-                if entry.state == .running && entry.neverFreeze {
-                    Label("On the Never freeze list", systemImage: "lock.fill")
-                        .font(.caption).foregroundStyle(.secondary)
-                } else {
+                if !(entry.state == .running && entry.neverFreeze) {
                     let running = entry.state == .running
                     GatedButton(gate: gate, action: .pause, help: "\(running ? "Pause" : "Resume") \(entry.name)",
                                 voiceOver: "\(running ? "Pause" : "Resume") \(entry.name)") {

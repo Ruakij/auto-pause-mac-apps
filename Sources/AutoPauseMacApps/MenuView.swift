@@ -414,7 +414,9 @@ private struct AppRow: View {
         }
         if entry.state != .sleeping {
             Divider()
-            Button("Auto-pause...") { showDetail = true }
+            if !entry.neverFreeze {
+                Button("Auto-pause...") { showDetail = true }
+            }
             if let id = entry.bundleID, !id.isEmpty {
                 Toggle("Never freeze", isOn: Binding(
                     get: { entry.neverFreeze },
@@ -457,7 +459,7 @@ private struct AppRow: View {
     private var badge: some View {
         switch entry.state {
         case .running:
-            if AppSettingsStore.shared.settings(for: entry.bundleID).autoPauseEnabled {
+            if !entry.neverFreeze, AppSettingsStore.shared.settings(for: entry.bundleID).autoPauseEnabled {
                 Image(systemName: "timer").font(.system(size: 8)).foregroundStyle(.secondary)
                     .help("Auto-pause is on")
             }

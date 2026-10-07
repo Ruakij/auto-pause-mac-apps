@@ -60,7 +60,8 @@ Two sections:
 
 While the pointer is over the list, rows stay where they are, so a row that was just paused does
 not move away under the next click; the list re-sorts when the pointer leaves. Right-clicking a
-row offers Pause or Resume, Deep Sleep or Wake, "Auto-pause..." and a "Never freeze" toggle.
+row offers Pause or Resume, Deep Sleep or Wake, "Auto-pause..." (not for apps on the Never
+freeze list) and a "Never freeze" toggle.
 A pause that is refused, or a wake that fails, always leaves a
 notice above the list: warnings in orange, confirmations in green.
 
@@ -339,7 +340,10 @@ saved). All checks use public APIs and need no permission.
 
 Some apps break the Mac when frozen. Apps on the **Never freeze** list are never paused: not
 automatically, not by Free Up Memory and not by hand, and there is no Force.
-Their row shows a lock icon instead of Pause and no busy or idle state. Deep Sleep (a normal quit)
+Their row shows a lock icon instead of Pause and no busy or idle state. They have no auto-pause:
+no timer, no "Auto-pause..." menu item, and the details popover reads "On the Never freeze list"
+instead of the auto-pause settings. An auto-pause setting made before the app was added is kept
+and applies again once the app is removed from the list. Deep Sleep (a normal quit)
 stays available. The defaults: Finder, System Settings, Screen Sharing, Activity Monitor,
 Passwords, 1Password, Bitwarden, KeePassXC, GlobalProtect, Tunnelblick, WireGuard, UTM, Docker
 Desktop, Parallels Desktop and VMware Fusion. **Settings > Never Freeze** lists them with name
