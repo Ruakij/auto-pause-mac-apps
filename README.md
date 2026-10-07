@@ -93,9 +93,8 @@ confirm button.**
 - **Recording and call apps** (QuickTime, OBS, ScreenFlow, Loom, Zoom, Teams, Meet, Discord,
   Slack…) start **unticked** and are flagged *"may be recording or in a call"*.
 - **Background services and daemons are never touched** — see below.
-- Optionally remember the opt-outs (checkbox, off by default) so those apps are never offered
-  again. **Settings > Never Freeze** lists them under "Not offered in Free Up Memory", each with
-  a remove button.
+- Optionally add the unticked apps to the **Never freeze** list (checkbox "Add the unticked
+  apps to Never freeze", off by default); busy apps are never added.
 
 Afterwards, **Restore** puts back exactly the set it paused, leaving anything you froze by hand
 still frozen.
@@ -373,8 +372,7 @@ stays available. The defaults: Finder, System Settings, Screen Sharing, Activity
 Passwords, 1Password, Bitwarden, KeePassXC, GlobalProtect, Tunnelblick, WireGuard, UTM, Docker
 Desktop, Parallels Desktop and VMware Fusion. **Settings > Never Freeze** lists them with name
 and icon, removes entries, adds any listed app and restores the defaults. Removing an app from
-the list makes it freezable. A second section there, **Not offered in Free Up Memory**, lists
-the apps opted out of the Free Up Memory checklist; removing one offers it again.
+the list makes it freezable.
 
 ---
 

@@ -193,6 +193,12 @@ final class AppListModel: ObservableObject {
     private var observers: [NSObjectProtocol] = []
 
     init() {
+        let migrated = AppSettingsStore.shared.takeExcludedFromReclaim().filter { !neverFreeze.contains($0) }
+        if !migrated.isEmpty {
+            // didSet does not run inside init.
+            neverFreeze += migrated
+            NeverFreezeList.save(neverFreeze)
+        }
         let center = NSWorkspace.shared.notificationCenter
         for note in [NSWorkspace.didLaunchApplicationNotification,
                      NSWorkspace.didTerminateApplicationNotification] {
@@ -406,16 +412,15 @@ final class AppListModel: ObservableObject {
 
     /// Apps that Free Up Memory may offer to pause.
     ///
-    /// Never includes this app, the app you're currently using, or anything you've
-    /// previously opted out of. Background services are deliberately absent: freezing
+    /// Never includes this app, the app you're currently using, or anything on the Never
+    /// freeze list. Background services are deliberately absent: freezing
     /// daemons broke the machine badly enough to make the feature unusable.
     var reclaimCandidates: [AppEntry] {
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
         return entries.filter { entry in
             guard entry.state == .running, !entry.neverFreeze, let pid = entry.pid else { return false }
             guard pid != frontmost else { return false }
-            guard !ProcessControl.treeContainsSelf(root: pid) else { return false }
-            return !AppSettingsStore.shared.settings(for: entry.bundleID).excludedFromReclaim
+            return !ProcessControl.treeContainsSelf(root: pid)
         }
         .sorted { $0.resident > $1.resident }
     }
@@ -461,21 +466,6 @@ final class AppListModel: ObservableObject {
         notice = Notice(text: "Restored \(reclaimSession.count) app\(reclaimSession.count == 1 ? "" : "s").")
         reclaimSession = []
         refresh()
-    }
-
-    /// Remember that an app should never be offered by Free Up Memory again.
-    func setExcludedFromReclaim(_ excluded: Bool, for entry: AppEntry) {
-        guard let id = entry.bundleID else { return }
-        setExcludedFromReclaim(excluded, bundleID: id)
-    }
-
-    func setExcludedFromReclaim(_ excluded: Bool, bundleID id: String) {
-        guard !id.isEmpty else { return }
-        objectWillChange.send()
-        var settings = AppSettingsStore.shared.settings(for: id)
-        settings.bundleID = id
-        settings.excludedFromReclaim = excluded
-        AppSettingsStore.shared.update(settings)
     }
 
     // MARK: - Auto-pause

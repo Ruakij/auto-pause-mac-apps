@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Settings > Never Freeze: apps that nothing freezes, with no Force (Deep Sleep stays
-/// available), and the apps Free Up Memory does not offer.
+/// available).
 struct NeverFreezeSettingsView: View {
     @ObservedObject var model: AppListModel
 
@@ -32,17 +32,6 @@ struct NeverFreezeSettingsView: View {
                     .buttonStyle(.plain)
             }
             .font(.caption)
-
-            Divider().padding(.vertical, 4)
-
-            Text("Not offered in Free Up Memory").font(.system(size: 12, weight: .semibold))
-            Text("Free Up Memory leaves these apps out of its checklist. They can still be paused by hand and automatically.")
-                .font(.system(size: 10)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            list(AppSettingsStore.shared.excludedFromReclaim) { id in
-                model.setExcludedFromReclaim(false, bundleID: id)
-            }
         }
         .padding(20)
     }

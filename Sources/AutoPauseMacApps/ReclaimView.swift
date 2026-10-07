@@ -13,7 +13,7 @@ struct ReclaimView: View {
     /// Apps ticked for pausing. Everything starts ticked; unticking is how you opt out.
     @State private var selected: Set<String> = []
     @State private var candidates: [AppEntry] = []
-    @State private var rememberOptOuts = false
+    @State private var addUntickedToNeverFreeze = false
     /// What keeps each candidate busy, by entry id; nil until the check has finished.
     @State private var busy: [String: [BusyFinding]]?
 
@@ -198,8 +198,8 @@ struct ReclaimView: View {
                 .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
             }
 
-            Toggle(isOn: $rememberOptOuts) {
-                Text("Don't offer the unticked apps again")
+            Toggle(isOn: $addUntickedToNeverFreeze) {
+                Text("Add the unticked apps to Never freeze")
                     .font(.system(size: 11))
             }
             .toggleStyle(.checkbox)
@@ -212,11 +212,12 @@ struct ReclaimView: View {
                 Spacer()
                 Button("Cancel", action: onDone)
                 Button(busy == nil ? "Checking..." : "Pause \(chosen.count)") {
-                    if rememberOptOuts {
-                        // Busy is a passing state, not a reason to never offer the app again.
-                        for entry in candidates where !selected.contains(entry.id) && busy?[entry.id] == nil {
-                            model.setExcludedFromReclaim(true, for: entry)
-                        }
+                    if addUntickedToNeverFreeze {
+                        // Busy is a passing state, not a reason to never freeze the app.
+                        let ids = candidates
+                            .filter { !selected.contains($0.id) && busy?[$0.id] == nil }
+                            .compactMap(\.bundleID)
+                        model.neverFreeze += Set(ids).sorted()
                     }
                     model.reclaim(selected: chosen)
                     onDone()

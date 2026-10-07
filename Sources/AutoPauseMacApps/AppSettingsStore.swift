@@ -5,7 +5,7 @@ struct AppSettings: Codable, Equatable {
     var bundleID: String
     var autoPauseEnabled: Bool = false
     var autoPauseMinutes: Int = 10
-    /// Never offer this app in Free Up Memory. Set when the user unticks it there.
+    /// Read only to migrate old files into the Never freeze list; see `takeExcludedFromReclaim`.
     var excludedFromReclaim: Bool = false
 }
 
@@ -73,8 +73,13 @@ final class AppSettingsStore {
         return existing
     }
 
-    var excludedFromReclaim: [String] {
-        byBundle.values.filter(\.excludedFromReclaim).map(\.bundleID).sorted()
+    /// Bundle IDs still flagged by the old Free Up Memory opt-out, flags cleared and saved.
+    func takeExcludedFromReclaim() -> [String] {
+        let ids = byBundle.values.filter(\.excludedFromReclaim).map(\.bundleID).sorted()
+        guard !ids.isEmpty else { return [] }
+        for id in ids { byBundle[id]?.excludedFromReclaim = false }
+        save()
+        return ids
     }
 
     func update(_ settings: AppSettings) {
