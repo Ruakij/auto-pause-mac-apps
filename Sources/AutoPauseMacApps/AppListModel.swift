@@ -54,26 +54,59 @@ struct ProcessStat: Identifiable, Equatable {
     let freezable: Bool
     /// Footprint at freeze minus subtree resident now, for frozen nodes.
     let reclaimed: UInt64
+    /// The VS Code window this node belongs to, with its subtree.
+    var window: Int? = nil
     var descendants: Int { subtree.count - 1 }
     var id: pid_t { pid }
 }
 
+/// One VS Code window of an expanded row: its processes with their subtrees, summed.
+struct WindowStat: Identifiable, Equatable {
+    let window: VSCodeWindow
+    let pids: [pid_t]
+    let resident: UInt64
+    let footprint: UInt64
+    var id: Int { window.id }
+}
+
+/// A line of an expanded row: a VS Code window header or a process.
+enum DetailRow: Identifiable {
+    case window(WindowStat)
+    case process(ProcessStat)
+
+    var id: String {
+        switch self {
+        case .window(let w): return "w\(w.id)"
+        case .process(let p): return "p\(p.pid)"
+        }
+    }
+}
+
 /// Contents of an expanded row: the app's whole process tree in tree order, app first, the
-/// children of every node by subtree resident, heaviest first.
+/// children of every node by subtree resident, heaviest first. For VS Code the processes of
+/// each mapped window come first, window by window, then the rest.
 struct AppDetail: Equatable {
     var processes: [ProcessStat]
+    var windows: [WindowStat] = []
 
-    /// The rows shown: everything below a collapsed node is hidden. The app (depth 0) is
+    /// The rows shown: a window header before the processes of its window, which show only
+    /// while it is expanded; everything below a collapsed node is hidden. The app (depth 0) is
     /// always open.
-    func visible(expanded: Set<pid_t>) -> [ProcessStat] {
-        var rows: [ProcessStat] = []
+    func visible(expanded: Set<pid_t>, expandedWindows: Set<Int>) -> [DetailRow] {
+        var rows: [DetailRow] = []
         var hiddenBelow: Int?
+        var lastWindow: Int?
         for p in processes {
+            if p.window != lastWindow {
+                lastWindow = p.window
+                if let w = windows.first(where: { $0.id == p.window }) { rows.append(.window(w)) }
+            }
+            if let id = p.window, !expandedWindows.contains(id) { continue }
             if let depth = hiddenBelow {
                 if p.depth > depth { continue }
                 hiddenBelow = nil
             }
-            rows.append(p)
+            rows.append(.process(p))
             if p.depth > 0, p.descendants > 0, !expanded.contains(p.pid) { hiddenBelow = p.depth }
         }
         return rows
@@ -163,6 +196,8 @@ final class AppListModel: ObservableObject {
     @Published private(set) var expanded: Set<pid_t> = []
     /// Processes whose children are shown; every node below the app starts collapsed.
     @Published private(set) var expandedProcesses: Set<pid_t> = []
+    /// VS Code windows (by window number) whose processes are shown.
+    @Published private(set) var expandedWindows: Set<Int> = []
     @Published private(set) var details: [pid_t: AppDetail] = [:]
     private struct ProcessLabel {
         let start: Date?
@@ -379,8 +414,12 @@ final class AppListModel: ObservableObject {
         expanded = expanded.filter { livePids.contains($0) }
         expandedProcesses = expandedProcesses.filter(ProcessControl.isAlive)
         var newDetails: [pid_t: AppDetail] = [:]
-        for pid in expanded { newDetails[pid] = detail(for: pid, apps: livePids) }
+        for app in apps where expanded.contains(app.processIdentifier) {
+            newDetails[app.processIdentifier] = detail(for: app, apps: livePids)
+        }
         details = newDetails
+        let shownWindows = Set(newDetails.values.flatMap { $0.windows.map(\.id) })
+        expandedWindows = expandedWindows.filter(shownWindows.contains)
         let shownPids = Set(newDetails.values.flatMap { $0.processes.map(\.pid) })
         processLabels = processLabels.filter { shownPids.contains($0.key) }
 
@@ -806,9 +845,41 @@ final class AppListModel: ObservableObject {
         expandedProcesses.formSymmetricDifference([pid])
     }
 
-    /// The app's process tree with memory per node and per subtree. `apps` are the listed app
-    /// pids: a subtree holding another one is not freezable.
-    private func detail(for app: pid_t, apps: Set<pid_t>) -> AppDetail {
+    func toggleExpandedWindow(_ id: Int) {
+        expandedWindows.formSymmetricDifference([id])
+    }
+
+    /// The app's process tree with memory per node and per subtree, for VS Code grouped by
+    /// window. `apps` are the listed app pids: a subtree holding another one is not freezable.
+    private func detail(for running: NSRunningApplication, apps: Set<pid_t>) -> AppDetail {
+        let app = running.processIdentifier
+        let nodes = tree(for: app, apps: apps)
+        guard running.bundleIdentifier.map(VSCodeWindows.bundleIDs.contains) == true else {
+            return AppDetail(processes: nodes)
+        }
+        let windows = VSCodeWindows.windows(main: app)
+        guard !windows.isEmpty else { return AppDetail(processes: nodes) }
+        // The anchors are direct children of the app: each depth-1 node starts a chunk that
+        // belongs to its window or to none.
+        let windowOf = Dictionary(windows.flatMap { w in w.anchors.map { ($0, w.id) } }, uniquingKeysWith: { a, _ in a })
+        var chunks: [[ProcessStat]] = []
+        for var node in nodes.dropFirst() {
+            if node.depth == 1 { chunks.append([]) }
+            node.window = windowOf[chunks.last?.first?.pid ?? node.pid]
+            chunks[chunks.count - 1].append(node)
+        }
+        let stats = windows.map { w in
+            let members = chunks.filter { $0.first?.window == w.id }.flatMap { $0 }
+            return WindowStat(window: w, pids: members.map(\.pid),
+                              resident: members.reduce(0) { $0 + $1.resident },
+                              footprint: members.reduce(0) { $0 + $1.footprint })
+        }.sorted { $0.resident > $1.resident }
+        let grouped = stats.flatMap { s in chunks.filter { $0.first?.window == s.id }.flatMap { $0 } }
+        return AppDetail(processes: [nodes[0]] + grouped + chunks.filter { $0.first?.window == nil }.flatMap { $0 },
+                         windows: stats)
+    }
+
+    private func tree(for app: pid_t, apps: Set<pid_t>) -> [ProcessStat] {
         let frozen = Set(PausedStore.shared.subprocessRecords(owner: app).map(\.pid))
         var seen: Set<pid_t> = [app]
         func build(_ pid: pid_t, _ depth: Int) -> [ProcessStat] {
@@ -833,7 +904,7 @@ final class AppListModel: ObservableObject {
                 reclaimed: isFrozen ? footprintAtPause[pid].map { $0 > subtreeResident ? $0 - subtreeResident : 0 } ?? 0 : 0)
             return [node] + children.flatMap { $0 }
         }
-        return AppDetail(processes: build(app, 0))
+        return build(app, 0)
     }
 
     private func label(of pid: pid_t) -> ProcessLabel {

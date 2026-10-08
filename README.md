@@ -284,6 +284,25 @@ A paused helper is resumed when:
 - the app is resumed, deep-slept or quits, Resume All runs, or Auto Pause quits,
 - the process leaves the app's tree (the app quit and it was handed to launchd).
 
+### VS Code windows
+
+VS Code runs a renderer, a file watcher and an extension host for every window; language
+servers and agents run below the extension host. In the process tree of VS Code (also VS Code
+Insiders and VSCodium) these processes are grouped by window: one line per window, labelled with
+its workspace folder ("Window N" when none is found), with CPU, resident memory and footprint
+summed over the window's processes, and a chevron that shows them. The rest (main process, GPU,
+network, terminals, shared helpers, renderers without a window) stays in the plain tree below
+the windows.
+
+The grouping reads only data of the running processes: the environment of the file watcher
+names its renderer, the extension host holds the log files of its window number open, and the
+extension host and file watcher of a window start in the same second. The workspace folder
+comes from the `workspace.json` of the storage folder the extension host has open, otherwise
+from the working directory most of its child processes share. Of the environment only VS Code's
+process type and parent variables are read; the rest is skipped, not kept. Each process is read
+once. Nothing is started for it (no `code --status`). Processes that do not fit, for example when two windows opened within the
+same two seconds, stay in the plain tree.
+
 An app can hang while it waits on a paused helper; the first pause of a single process says so
 once. Helpers that macOS runs as XPC services (WebKit content, GPU and networking processes of
 Safari, Mail and every app using a web view) are not children of the app and are not listed.

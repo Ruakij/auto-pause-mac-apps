@@ -36,7 +36,7 @@ struct MenuView: View {
                 // the MenuBarExtra window would collapse it.
                 .frame(height: listHeight(sections: [top.count, apps.count],
                                           stateLines: model.entries.filter(\.showsState).count,
-                                          processLists: model.details.values.map { $0.height(expanded: model.expandedProcesses) }.reduce(0, +)))
+                                          processLists: model.details.values.map { $0.height(expanded: model.expandedProcesses, expandedWindows: model.expandedWindows) }.reduce(0, +)))
                 .onHover { inside in
                     pinned = inside ? (top.map(Self.pinKey), apps.map(Self.pinKey)) : nil
                 }
@@ -710,8 +710,8 @@ extension AppDetail {
     static let lineHeight: CGFloat = 16
 
     /// Height of the expanded part of a row, from fixed line metrics like `listHeight`.
-    func height(expanded: Set<pid_t>) -> CGFloat {
-        CGFloat(visible(expanded: expanded).count) * Self.lineHeight + 6
+    func height(expanded: Set<pid_t>, expandedWindows: Set<Int>) -> CGFloat {
+        CGFloat(visible(expanded: expanded, expandedWindows: expandedWindows).count) * Self.lineHeight + 6
     }
 }
 
@@ -724,8 +724,11 @@ private struct ProcessListView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(detail.visible(expanded: model.expandedProcesses)) {
-                ProcessLine(entry: entry, process: $0, model: model)
+            ForEach(detail.visible(expanded: model.expandedProcesses, expandedWindows: model.expandedWindows)) { row in
+                switch row {
+                case .window(let window): WindowLine(entry: entry, window: window, model: model)
+                case .process(let process): ProcessLine(entry: entry, process: process, model: model)
+                }
             }
         }
     }
@@ -759,7 +762,8 @@ private struct ProcessLine: View {
                 }
                 Text(process.name).lineLimit(1).truncationMode(.middle)
             }
-            .padding(.leading, CGFloat(min(process.depth, 6)) * 8)
+            // Processes of a VS Code window sit one level below its header.
+            .padding(.leading, CGFloat(min(process.depth + (process.window == nil ? 0 : 1), 6)) * 8)
             if let role = process.role, role != process.name {
                 Text(role).lineLimit(1).foregroundStyle(.tertiary)
             }
@@ -819,5 +823,60 @@ private struct ProcessLine: View {
             .help(inUse ? inUseHelp : "Pause \(process.name) and its subprocesses")
             .accessibilityLabel("Pause \(process.name)")
         }
+    }
+}
+
+/// A VS Code window: its workspace folder, the number of its processes while collapsed, then
+/// CPU, resident and footprint summed over them.
+private struct WindowLine: View {
+    let entry: AppEntry
+    let window: WindowStat
+    @ObservedObject var model: AppListModel
+
+    private var collapsed: Bool { !model.expandedWindows.contains(window.id) }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            HStack(spacing: 2) {
+                Button { model.toggleExpandedWindow(window.id) } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 7, weight: .semibold))
+                        .rotationEffect(.degrees(collapsed ? 0 : 90))
+                        .frame(width: 8)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(collapsed ? "Show" : "Hide") processes of window \(window.window.label)")
+                Image(systemName: "macwindow")
+                Text(window.window.label).lineLimit(1).truncationMode(.middle)
+                    .foregroundStyle(.primary)
+                    .help(window.window.path ?? "VS Code window \(window.id)")
+            }
+            .padding(.leading, 8)
+            if collapsed {
+                Text("\(window.pids.count) processes").foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 4)
+            figures
+            Color.clear.frame(width: 14)
+        }
+        .font(.system(size: 9))
+        .foregroundStyle(.secondary)
+        .frame(height: AppDetail.lineHeight)
+    }
+
+    private var figures: some View {
+        let measured = window.pids.compactMap { model.processCPU[$0] }
+        return HStack(spacing: 6) {
+            Text(measured.isEmpty ? "-" : BusyPass.format(measured.reduce(0, +)) + "%")
+                .frame(width: 34, alignment: .trailing)
+            Text(MenuView.fmt(window.resident))
+                .frame(width: 50, alignment: .trailing)
+            Text(MenuView.fmt(window.footprint))
+                .foregroundStyle(.tertiary)
+                .frame(width: 50, alignment: .trailing)
+                .help("Footprint, incl. compressed and swapped pages")
+        }
+        .monospacedDigit()
     }
 }

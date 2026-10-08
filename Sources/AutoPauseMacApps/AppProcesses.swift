@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 /// Labels for the processes of an app's tree: executable name, Chromium/Electron role, command
-/// line and environment. View-only: nothing here freezes.
+/// line and chosen environment variables. View-only: nothing here freezes.
 enum AppProcesses {
 
     static func executableName(of pid: pid_t) -> String {
@@ -11,8 +11,9 @@ enum AppProcesses {
         return (String(cString: buf) as NSString).lastPathComponent
     }
 
-    /// argv and environment of a same-user process (KERN_PROCARGS2); nil for other users.
-    static func commandLine(of pid: pid_t) -> (args: [String], env: [String: String])? {
+    /// argv of a same-user process (KERN_PROCARGS2) and the values of the environment variables
+    /// named in `envKeys`; nil for other users. The rest of the environment is skipped, not kept.
+    static func commandLine(of pid: pid_t, envKeys: Set<String> = []) -> (args: [String], env: [String: String])? {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
         var size = 0
         guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
@@ -24,20 +25,24 @@ enum AppProcesses {
         var i = MemoryLayout<Int32>.size
         while i < size && buf[i] != 0 { i += 1 }
         while i < size && buf[i] == 0 { i += 1 }
-        var strings: [String] = []
-        while i < size {
+        var args: [String] = []
+        var env: [String: String] = [:]
+        while i < size, args.count < argc || !envKeys.isEmpty {
             let start = i
             while i < size && buf[i] != 0 { i += 1 }
-            if i == start && strings.count >= argc { break }
-            strings.append(String(decoding: buf[start..<i], as: UTF8.self))
+            let entry = buf[start..<i]
             i += 1
+            if args.count < argc {
+                args.append(String(decoding: entry, as: UTF8.self))
+                continue
+            }
+            guard !entry.isEmpty else { break }
+            // Only the key is decoded before the check, so no other value is ever a string.
+            guard let eq = entry.firstIndex(of: UInt8(ascii: "=")),
+                  envKeys.contains(String(decoding: entry[..<eq], as: UTF8.self)) else { continue }
+            env[String(decoding: entry[..<eq], as: UTF8.self)] = String(decoding: entry[(eq + 1)...], as: UTF8.self)
         }
-        var env: [String: String] = [:]
-        for entry in strings.dropFirst(argc) {
-            guard let eq = entry.firstIndex(of: "=") else { continue }
-            env[String(entry[..<eq])] = String(entry[entry.index(after: eq)...])
-        }
-        return (Array(strings.prefix(argc)), env)
+        return (args, env)
     }
 
     static func flag(_ name: String, in args: [String]) -> String? {
