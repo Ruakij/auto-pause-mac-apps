@@ -26,6 +26,13 @@ extension AppSettings {
 enum PauseFlags {
     private static let seenDeepSleepWarningKey = "PauseHasSeenDeepSleepWarning"
     private static let completedOnboardingKey = "PauseHasCompletedOnboarding"
+    private static let seenProcessPauseNoticeKey = "PauseHasSeenProcessPauseNotice"
+
+    /// The notice that an app may wait for a process paused on its own, shown once.
+    static var hasSeenProcessPauseNotice: Bool {
+        get { UserDefaults.standard.bool(forKey: seenProcessPauseNoticeKey) }
+        set { UserDefaults.standard.set(newValue, forKey: seenProcessPauseNoticeKey) }
+    }
 
     static var hasSeenDeepSleepWarning: Bool {
         get { UserDefaults.standard.bool(forKey: seenDeepSleepWarningKey) }

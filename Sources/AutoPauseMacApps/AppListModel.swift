@@ -22,8 +22,62 @@ struct AppEntry: Identifiable, Equatable {
     let history: [UInt64]
     /// On the Never freeze list: no Pause, no state line.
     var neverFreeze = false
+    /// Processes in the app's tree, the app included.
+    var processCount = 1
+    /// Subtrees of the app frozen on their own (subprocess records).
+    var pausedProcesses = 0
 
     var canDeepSleep: Bool { state != .sleeping }
+    /// Frozen whole or with some processes frozen: Resume All and the menu-bar icon count it.
+    var hasPaused: Bool { state == .paused || pausedProcesses > 0 }
+}
+
+/// One process of an expanded row.
+struct ProcessStat: Identifiable, Equatable {
+    let pid: pid_t
+    let name: String
+    let role: String?
+    /// Depth in the app's process tree, the app itself at 0.
+    let depth: Int
+    let resident: UInt64
+    let footprint: UInt64
+    /// This process and its descendants.
+    let subtreeResident: UInt64
+    let subtreeFootprint: UInt64
+    /// This process and its descendants, for the CPU sum of a collapsed node.
+    let subtree: [pid_t]
+    let stopped: Bool
+    /// Frozen on its own: a subprocess record holds it.
+    let frozen: Bool
+    /// May be paused on its own: not the app process, and no process of its subtree is a
+    /// Chromium shared role, of another user or another listed app.
+    let freezable: Bool
+    /// Footprint at freeze minus subtree resident now, for frozen nodes.
+    let reclaimed: UInt64
+    var descendants: Int { subtree.count - 1 }
+    var id: pid_t { pid }
+}
+
+/// Contents of an expanded row: the app's whole process tree in tree order, app first, the
+/// children of every node by subtree resident, heaviest first.
+struct AppDetail: Equatable {
+    var processes: [ProcessStat]
+
+    /// The rows shown: everything below a collapsed node is hidden. The app (depth 0) is
+    /// always open.
+    func visible(expanded: Set<pid_t>) -> [ProcessStat] {
+        var rows: [ProcessStat] = []
+        var hiddenBelow: Int?
+        for p in processes {
+            if let depth = hiddenBelow {
+                if p.depth > depth { continue }
+                hiddenBelow = nil
+            }
+            rows.append(p)
+            if p.depth > 0, p.descendants > 0, !expanded.contains(p.pid) { hiddenBelow = p.depth }
+        }
+        return rows
+    }
 }
 
 /// What an app row shows under its memory line while the panel is open.
@@ -101,8 +155,25 @@ final class AppListModel: ObservableObject {
     private var history: [pid_t: [UInt64]] = [:]
     private let historyLimit = 40
 
-    /// Footprint captured at the moment an app was frozen, so we can show what was reclaimed.
+    /// Footprint captured at the moment an app or subtree was frozen, so we can show what was
+    /// reclaimed.
     private var footprintAtPause: [pid_t: UInt64] = [:]
+
+    /// App rows expanded into their process tree; only these are read per process.
+    @Published private(set) var expanded: Set<pid_t> = []
+    /// Processes whose children are shown; every node below the app starts collapsed.
+    @Published private(set) var expandedProcesses: Set<pid_t> = []
+    @Published private(set) var details: [pid_t: AppDetail] = [:]
+    private struct ProcessLabel {
+        let start: Date?
+        let name: String
+        let role: String?
+        let freezable: Bool
+    }
+    /// Per pid and start time, so the command line is read once per process.
+    private var processLabels: [pid_t: ProcessLabel] = [:]
+    /// Exit watchers on the unfrozen direct children of apps with frozen subprocesses.
+    private var exitWatchers: [pid_t: DispatchSourceProcess] = [:]
 
     /// Last time each app was frontmost, for idle-based auto-pause.
     private var lastFrontDate: [pid_t: Date] = [:]
@@ -203,7 +274,12 @@ final class AppListModel: ObservableObject {
         }
     }
 
+    /// Frozen whole, or with subprocesses frozen on their own.
     private func isFrozen(_ pid: pid_t) -> Bool {
+        isFrozenWhole(pid) || !PausedStore.shared.subprocessRecords(owner: pid).isEmpty
+    }
+
+    private func isFrozenWhole(_ pid: pid_t) -> Bool {
         ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid)
     }
 
@@ -212,10 +288,14 @@ final class AppListModel: ObservableObject {
         footprintAtPause[pid] = nil
     }
 
-    /// The one place a single frozen app is resumed: activation, a Dock click and Resume. It
-    /// leaves the Free Up Memory run too, so Restore does not count it.
+    /// The one place a single frozen app is resumed: activation, a Dock click and Resume. Its
+    /// frozen subprocesses resume first, then the app if it is frozen whole. It leaves the Free
+    /// Up Memory run too, so Restore does not count it.
     private func thaw(pid: pid_t) {
-        ProcessControl.resumeTree(root: pid)
+        resumeSubprocesses(of: pid)
+        // Only an app frozen whole gets its whole tree resumed: a stopped job in a terminal
+        // app's tree is the user's, not ours.
+        if isFrozenWhole(pid) { ProcessControl.resumeTree(root: pid) }
         PausedStore.shared.remove(pid: pid)
         footprintAtPause[pid] = nil
         reclaimSession.removeAll { $0 == pid }
@@ -294,7 +374,15 @@ final class AppListModel: ObservableObject {
         let livePids = Set(apps.map(\.processIdentifier))
         history = history.filter { livePids.contains($0.key) }
         cpuHistory = cpuHistory.filter { livePids.contains($0.key) }
-        footprintAtPause = footprintAtPause.filter { livePids.contains($0.key) }
+        let recordPids = Set(PausedStore.shared.records.map(\.pid))
+        footprintAtPause = footprintAtPause.filter { livePids.contains($0.key) || recordPids.contains($0.key) }
+        expanded = expanded.filter { livePids.contains($0) }
+        expandedProcesses = expandedProcesses.filter(ProcessControl.isAlive)
+        var newDetails: [pid_t: AppDetail] = [:]
+        for pid in expanded { newDetails[pid] = detail(for: pid, apps: livePids) }
+        details = newDetails
+        let shownPids = Set(newDetails.values.flatMap { $0.processes.map(\.pid) })
+        processLabels = processLabels.filter { shownPids.contains($0.key) }
 
         var newEntries: [AppEntry] = []
 
@@ -302,8 +390,9 @@ final class AppListModel: ObservableObject {
             let pid = app.processIdentifier
             guard pid > 0 else { continue }
 
-            let paused = ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid)
-            let mem = ProcessControl.treeMemory(root: pid)
+            let paused = isFrozenWhole(pid)
+            let tree = ProcessControl.processTree(root: pid)
+            let mem = ProcessControl.treeMemory(pids: tree)
 
             if !paused {
                 var samples = history[pid] ?? []
@@ -329,7 +418,9 @@ final class AppListModel: ObservableObject {
                 state: paused ? .paused : .running,
                 launchDate: app.launchDate,
                 history: history[pid] ?? [],
-                neverFreeze: isNeverFreeze(app.bundleIdentifier)
+                neverFreeze: isNeverFreeze(app.bundleIdentifier),
+                processCount: tree.count,
+                pausedProcesses: PausedStore.shared.subprocessRecords(owner: pid).count
             ))
         }
 
@@ -364,8 +455,9 @@ final class AppListModel: ObservableObject {
             }
             return lhs.resident > rhs.resident
         }
-        pausedCount = entries.filter { $0.state != .running }.count
+        pausedCount = entries.filter { $0.state != .running || $0.hasPaused }.count
         syncDockClickMonitor()
+        syncExitWatchers()
         startLivePass(apps)
 
         let stats = SystemStats.current()
@@ -401,7 +493,7 @@ final class AppListModel: ObservableObject {
         for entry in selected {
             guard let pid = entry.pid else { continue }
             footprintAtPause[pid] = entry.footprint
-            guard freeze(root: pid, bundleID: entry.bundleID) else {
+            guard freeze(root: pid, app: pid, bundleID: entry.bundleID) else {
                 skipped.append(entry.name)   // refused, e.g. it would have frozen us
                 continue
             }
@@ -423,6 +515,7 @@ final class AppListModel: ObservableObject {
     /// Undo exactly what the last reclaim froze, leaving anything you froze by hand alone.
     func restoreReclaimSession() {
         for pid in reclaimSession {
+            resumeSubprocesses(of: pid)
             ProcessControl.resumeTree(root: pid)
             PausedStore.shared.remove(pid: pid)
             footprintAtPause[pid] = nil
@@ -499,7 +592,7 @@ final class AppListModel: ObservableObject {
                 return
             }
             let footprint = ProcessControl.treeMemory(root: pid).footprint
-            guard freeze(root: pid, bundleID: app.bundleIdentifier) else { return }
+            guard freeze(root: pid, app: pid, bundleID: app.bundleIdentifier) else { return }
             footprintAtPause[pid] = footprint
             PausedStore.shared.add(PausedRecord(
                 pid: pid, bundleID: app.bundleIdentifier,
@@ -574,13 +667,25 @@ final class AppListModel: ObservableObject {
         pid != nil && pid == frontPid
     }
 
-    /// The one place anything is frozen: a manual Pause, auto-pause and Free Up Memory.
-    /// Apps on the Never freeze list and the frontmost app are refused here, with no Force:
-    /// activating a frozen app is what thaws it, and the frontmost app gets no activation when
-    /// clicked, so it would stay frozen. `pauseTree` keeps its own guard against freezing this
-    /// process.
-    private func freeze(root: pid_t, bundleID: String?) -> Bool {
-        guard !isNeverFreeze(bundleID), !isFrontmost(root) else { return false }
+    /// The one place anything is frozen: a manual Pause, a process paused on its own,
+    /// auto-pause and Free Up Memory. `root` is the app pid or a process of its tree, `app`
+    /// the app it belongs to. Apps on the Never freeze list and the frontmost app are refused
+    /// here, checked against the app, with no Force: activating a frozen app is what thaws it,
+    /// and the frontmost app gets no activation when clicked, so it would stay frozen. A tree
+    /// holding another listed app (a dev build started from a terminal) is refused too: that
+    /// app may be frontmost or on the list itself. A subprocess must still be in the app's
+    /// tree, and no process below it may be a Chromium shared role (which would stall every
+    /// window) or belong to another user. `pauseTree` keeps its own guard against freezing
+    /// this process or one of its ancestors.
+    private func freeze(root: pid_t, app: pid_t, bundleID: String?) -> Bool {
+        guard !isNeverFreeze(bundleID), !isFrontmost(app) else { return false }
+        let tree = ProcessControl.processTree(root: root)
+        let otherApps = Set(listedApps().map(\.processIdentifier)).subtracting([app])
+        guard !tree.contains(where: otherApps.contains) else { return false }
+        if root != app {
+            guard ProcessControl.processTree(root: app).contains(root),
+                  tree.allSatisfy({ label(of: $0).freezable }) else { return false }
+        }
         return ProcessControl.pauseTree(root: root)
     }
 
@@ -589,13 +694,13 @@ final class AppListModel: ObservableObject {
     func pause(_ entry: AppEntry) {
         guard let pid = entry.pid else { return }
         footprintAtPause[pid] = entry.footprint
-        guard freeze(root: pid, bundleID: entry.bundleID) else {
+        guard freeze(root: pid, app: pid, bundleID: entry.bundleID) else {
             footprintAtPause[pid] = nil
             notice = Notice(text: isNeverFreeze(entry.bundleID)
                 ? "\(entry.name) is on the Never freeze list and was not paused."
                 : isFrontmost(pid)
                 ? "\(entry.name) is in use and was not paused. Switch to another app to pause it."
-                : "\(entry.name) could not be paused: it has quit, or Auto Pause runs inside it.",
+                : "\(entry.name) could not be paused: it has quit, another app runs inside it, or Auto Pause runs inside it.",
                 isWarning: true)
             return
         }
@@ -687,6 +792,143 @@ final class AppListModel: ObservableObject {
                 _ = await wake(rec)
                 refresh()
             }
+        }
+    }
+
+    // MARK: - Process tree
+
+    func toggleExpanded(_ pid: pid_t) {
+        expanded.formSymmetricDifference([pid])
+        refresh()
+    }
+
+    func toggleExpandedProcess(_ pid: pid_t) {
+        expandedProcesses.formSymmetricDifference([pid])
+    }
+
+    /// The app's process tree with memory per node and per subtree. `apps` are the listed app
+    /// pids: a subtree holding another one is not freezable.
+    private func detail(for app: pid_t, apps: Set<pid_t>) -> AppDetail {
+        let frozen = Set(PausedStore.shared.subprocessRecords(owner: app).map(\.pid))
+        var seen: Set<pid_t> = [app]
+        func build(_ pid: pid_t, _ depth: Int) -> [ProcessStat] {
+            let children = ProcessControl.children(of: pid)
+                .filter { seen.insert($0).inserted }
+                .map { build($0, depth + 1) }
+                .sorted { $0[0].subtreeResident > $1[0].subtreeResident }
+            let mem = ProcessControl.memoryInfo(of: pid)
+            let label = label(of: pid)
+            let subtreeResident = children.reduce(mem.resident) { $0 + $1[0].subtreeResident }
+            let isFrozen = frozen.contains(pid)
+            let node = ProcessStat(
+                pid: pid, name: label.name, role: label.role, depth: depth,
+                resident: mem.resident, footprint: mem.footprint,
+                subtreeResident: subtreeResident,
+                subtreeFootprint: children.reduce(mem.footprint) { $0 + $1[0].subtreeFootprint },
+                subtree: [pid] + children.flatMap { $0.map(\.pid) },
+                stopped: ProcessControl.isStopped(pid), frozen: isFrozen,
+                // Children are built first, so theirs already covers their subtrees.
+                freezable: depth > 0 && label.freezable && !apps.contains(pid)
+                    && children.allSatisfy { $0[0].freezable },
+                reclaimed: isFrozen ? footprintAtPause[pid].map { $0 > subtreeResident ? $0 - subtreeResident : 0 } ?? 0 : 0)
+            return [node] + children.flatMap { $0 }
+        }
+        return AppDetail(processes: build(app, 0))
+    }
+
+    private func label(of pid: pid_t) -> ProcessLabel {
+        let start = ProcessControl.startTime(of: pid)
+        if let cached = processLabels[pid], cached.start == start { return cached }
+        // nil for processes of other users, which cannot be signalled.
+        let args = AppProcesses.commandLine(of: pid)?.args
+        let label = ProcessLabel(start: start, name: AppProcesses.executableName(of: pid),
+                                 role: args.flatMap(AppProcesses.chromiumRole),
+                                 freezable: args.map { !AppProcesses.isSharedRole($0) } ?? false)
+        processLabels[pid] = label
+        return label
+    }
+
+    /// Pauses one process with its subtree, recorded with its start time and the app pid.
+    func pauseProcess(_ pid: pid_t, of entry: AppEntry) {
+        guard let app = entry.pid, pid != app else { return }
+        let name = AppProcesses.executableName(of: pid)
+        let start = ProcessControl.startTime(of: pid)
+        let footprint = ProcessControl.treeMemory(root: pid).footprint
+        guard freeze(root: pid, app: app, bundleID: entry.bundleID) else {
+            notice = Notice(text: isNeverFreeze(entry.bundleID)
+                ? "\(entry.name) is on the Never freeze list; none of its processes are paused."
+                : isFrontmost(app)
+                ? "\(entry.name) is in use, so \(name) was not paused. Switch to another app first."
+                : "\(name) could not be paused: it has quit, it or a process below it serves the whole app or is another app, or Auto Pause runs inside it.",
+                isWarning: true)
+            return
+        }
+        footprintAtPause[pid] = footprint
+        PausedStore.shared.add(PausedRecord(
+            pid: pid, bundleID: entry.bundleID, name: name, launchDate: start,
+            ownerPid: app, kind: PausedRecord.processKind))
+        if !PauseFlags.hasSeenProcessPauseNotice {
+            PauseFlags.hasSeenProcessPauseNotice = true
+            notice = Notice(text: "Paused \(name). If \(entry.name) stops responding, it is waiting for it: "
+                + "resume it here, or switch to \(entry.name), which resumes it.")
+        }
+        refresh()
+    }
+
+    /// Resumes one frozen process with its subtree and drops every subprocess record in it.
+    func resumeProcess(_ pid: pid_t) {
+        let subtree = Set(ProcessControl.processTree(root: pid))
+        for rec in PausedStore.shared.records where rec.isSubprocess && subtree.contains(rec.pid) {
+            if rec.pid == pid, rec.isLive { ProcessControl.resumeTree(root: pid) }
+            dropRecord(rec.pid)
+        }
+        refresh()
+    }
+
+    /// Resumes the app's subprocess records, children before the app.
+    private func resumeSubprocesses(of owner: pid_t) {
+        for rec in PausedStore.shared.subprocessRecords(owner: owner) {
+            // The pid may belong to another process by now.
+            if rec.isLive { ProcessControl.resumeTree(root: rec.pid) }
+            dropRecord(rec.pid)
+        }
+    }
+
+    /// An app quitting from the Dock or its menu may wait for a frozen helper and hang. There
+    /// is no notification for another app starting to quit, but its unfrozen helpers exit at
+    /// once, so the exit of an unfrozen direct child thaws the app's frozen subprocesses. A
+    /// helper restarting does the same, which costs one re-freeze.
+    private func syncExitWatchers() {
+        // ponytail: age heuristic. Short-lived children (a git run, a terminal tab's login)
+        // would thaw everything on exit; only children alive this long count as helpers. A
+        // long-lived child that exits on its own still thaws; tell helpers from jobs by role
+        // if that turns out to matter.
+        let minAge: TimeInterval = 10
+        let now = Date()
+        var wanted: [pid_t: pid_t] = [:]
+        for owner in Set(PausedStore.shared.records.filter(\.isSubprocess).compactMap(\.ownerPid)) {
+            for child in ProcessControl.children(of: owner) where !ProcessControl.isStopped(child) {
+                guard let start = ProcessControl.startTime(of: child),
+                      now.timeIntervalSince(start) >= minAge else { continue }
+                wanted[child] = owner
+            }
+        }
+        for (pid, source) in exitWatchers where wanted[pid] == nil {
+            source.cancel()
+            exitWatchers[pid] = nil
+        }
+        for (pid, owner) in wanted where exitWatchers[pid] == nil {
+            let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+            source.setEventHandler { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.exitWatchers.removeValue(forKey: pid)?.cancel()
+                    self.resumeSubprocesses(of: owner)
+                    self.refresh()
+                }
+            }
+            source.resume()
+            exitWatchers[pid] = source
         }
     }
 }

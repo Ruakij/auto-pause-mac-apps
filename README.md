@@ -58,7 +58,10 @@ Two sections:
   the memory figure (*"1.2 GB  12% CPU"*, hidden below 0.1 %), a live sparkline (memory in blue,
   CPU in pink with a dashed line at the CPU busy threshold) and,
   at the right edge of every row in the same order: details and auto-pause, Deep Sleep and
-  Pause.
+  Pause. Apps with several processes show the count ("12 processes"); apps with processes
+  paused on their own show "2 processes paused" instead and stay in this section.
+
+The chevron at the left of a row opens the app's process tree (see "Process tree" below).
 
 While the pointer is over the list, rows stay where they are, so a row that was just paused does
 not move away under the next click; the list re-sorts when the pointer leaves. Right-clicking a
@@ -71,7 +74,7 @@ available. While the Settings window is open, Auto Pause itself is in front, so 
 paused. A pause that is refused, or a wake that fails, always leaves a
 notice above the list: warnings in orange, confirmations in green.
 
-The footer holds **Free Up Memory**, **Resume All** (paused apps), **Wake all**
+The footer holds **Free Up Memory**, **Resume All** (paused apps and processes), **Wake all**
 (relaunches deep-slept apps, shown only while there are any), the gear that opens the
 Settings window (also Cmd-, while the panel is open) and quit. Settings and the walkthrough
 always open on the current Space, centered on the screen whose menu bar was clicked.
@@ -251,6 +254,39 @@ position, same undo history, same unsaved text.
 *Why the process tree matters:* Chrome's memory isn't in Chrome. It's spread across ~25
 `Google Chrome Helper` processes. Freezing only the parent frees almost nothing, which is why
 naive "app pauser" scripts don't work on browsers.
+
+### Process tree - pause a single helper
+
+The chevron at the left of an app row opens its process tree: the app itself, then its child
+processes, each with CPU, resident memory and footprint (dim). Children are sorted by the
+resident memory of their whole subtree, heaviest first. A process with children of its own
+starts collapsed with "+N" and shows the totals of its subtree until opened. Nodes show live
+figures only, no graphs. Chromium and Electron helpers carry their role ("renderer",
+"gpu-process", "NetworkService").
+
+Pause on a node freezes that process with all its children, the app and the rest of the tree
+keep running; Resume on it thaws the subtree. Not offered: the app process (that is the row's
+Pause), Chromium services shared by every window (GPU, network, storage, audio, zygote,
+broker, crashpad: freezing one stalls the whole app) and any process with such a service below
+it, processes of other users or with one below them, processes with another app below them (an
+app started from a terminal), processes of the app in use, and apps on the Never freeze list.
+An app whose tree holds another app (one started from its terminal) is not paused whole
+either: that app may be in use or on the Never freeze list. Free Up Memory and auto-pause always pause
+whole apps.
+
+A paused helper is resumed when:
+
+- the app comes to the front (the app may be waiting for that helper, and coming back to it is
+  the signal it is in use again),
+- an unfrozen direct child of the app that has run for at least 10 seconds exits, which
+  happens when the app starts quitting from the Dock or its menu (a helper restarting does the
+  same; pausing it again is one click; short-lived children such as a git run do not count),
+- the app is resumed, deep-slept or quits, Resume All runs, or Auto Pause quits,
+- the process leaves the app's tree (the app quit and it was handed to launchd).
+
+An app can hang while it waits on a paused helper; the first pause of a single process says so
+once. Helpers that macOS runs as XPC services (WebKit content, GPU and networking processes of
+Safari, Mail and every app using a web view) are not children of the app and are not listed.
 
 ### 🌙 Deep Sleep — free everything, including swap
 
@@ -449,7 +485,8 @@ holds regardless of what the UI asks for — and it can only ever signal process
 ### What happens if the app crashes while things are frozen?
 
 Frozen and sleeping apps are recorded on disk, so they stay listed and resumable next launch.
-Quitting the app normally resumes everything automatically.
+Quitting the app normally, logging out, restarting or shutting down resumes everything
+automatically.
 
 ### Can it snapshot an app to disk and restore it later?
 

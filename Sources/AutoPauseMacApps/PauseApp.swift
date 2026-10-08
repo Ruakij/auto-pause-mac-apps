@@ -3,8 +3,15 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
+    private var powerOffObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Logout, restart and shutdown: apps quit in no fixed order, so a frozen one could
+        // block the logout or be killed before Auto Pause quits and resumes it.
+        powerOffObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main) { _ in
+            Self.resumeEverything()
+        }
         if !PauseFlags.hasCompletedOnboarding {
             // Give the status item a moment to appear so the "look up here" hint lands
             // on a menu bar that already shows our icon.
@@ -15,7 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Never strand frozen apps or processes: resume everything on quit.
+        Self.resumeEverything()
+    }
+
+    /// Never strand frozen apps or processes: every exit path resumes everything recorded.
+    static func resumeEverything() {
         for rec in PausedStore.shared.resumeOrder {
             // A subprocess record's pid may belong to another process by now.
             if rec.ownerPid == nil || rec.isLive { ProcessControl.resumeTree(root: rec.pid) }

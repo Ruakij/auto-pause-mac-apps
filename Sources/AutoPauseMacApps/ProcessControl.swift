@@ -4,7 +4,8 @@ import Darwin
 /// Low-level process control: tree enumeration, memory footprint, SIGSTOP/SIGCONT.
 enum ProcessControl {
 
-    /// All pids in the process tree rooted at `root` (root included), breadth-first.
+    /// All pids in the process tree rooted at `root` (root included), depth-first: every
+    /// process comes after its ancestors.
     static func processTree(root: pid_t) -> [pid_t] {
         var result: [pid_t] = [root]
         var queue: [pid_t] = [root]
@@ -59,7 +60,12 @@ enum ProcessControl {
 
     /// Summed memory over the whole process tree.
     static func treeMemory(root: pid_t) -> MemoryInfo {
-        processTree(root: root).reduce(into: MemoryInfo()) { acc, pid in
+        treeMemory(pids: processTree(root: root))
+    }
+
+    /// Summed memory over these pids, e.g. a tree already walked.
+    static func treeMemory(pids: [pid_t]) -> MemoryInfo {
+        pids.reduce(into: MemoryInfo()) { acc, pid in
             let m = memoryInfo(of: pid)
             acc.resident += m.resident
             acc.footprint += m.footprint

@@ -35,14 +35,14 @@ Everything that talks to the OS about processes. No UI, no state; pure functions
 
 | Function | What it does | Why it matters |
 |---|---|---|
-| `processTree(root:)` | Breadth-first walk via `proc_listchildpids`, returns the app plus every descendant | Chrome's memory lives in ~25 helper processes. Signalling only the parent would free almost nothing. |
+| `processTree(root:)` | Depth-first walk via `proc_listchildpids`, returns the app plus every descendant, each after its ancestors (`resumeTree` walks it reversed, children first) | Chrome's memory lives in ~25 helper processes. Signalling only the parent would free almost nothing. |
 | `memoryInfo(of:)` | One `proc_pid_rusage` call returning **both** `ri_resident_size` and `ri_phys_footprint` | The two numbers diverge enormously (Chrome: 275 MB vs 4.31 GB). Reporting only footprint made pausing look broken. |
 | `treeMemory(root:)` | Sums `MemoryInfo` across the tree | An app's real cost is the whole tree. |
 | `pauseTree(root:)` | `SIGSTOP` **parent first**, then descendants | Parent-first stops it spawning new children mid-freeze, which would escape the sweep. |
 | `resumeTree(root:)` | `SIGCONT` children first, parent last | Reverse order so the parent finds its children already alive. |
 | `children(of:)` | Direct children via `proc_listchildpids`, growing the buffer as needed | The step of `processTree`. |
 | `cpuTimeNanos(of:)` | User + system CPU from `proc_pid_rusage`, mach ticks converted to ns | The CPU sampler of busy detection. |
-| `startTime(of:)` | `pbi_start_tvsec`/`usec` from `PROC_PIDTBSDINFO` | Pairs the pid of a window record (see Persistence) with its start time, as `launchDate` does for apps. |
+| `startTime(of:)` | `pbi_start_tvsec`/`usec` from `PROC_PIDTBSDINFO` | Pairs the pid of a subprocess record (see Persistence) with its start time, as `launchDate` does for apps; also keys the process label cache and ages children for the exit watchers. |
 | `isStopped(_:)` | Reads `pbi_status == SSTOP` | Ground truth. Detects apps frozen outside Pause, and survives Pause restarting. |
 | `treeContainsSelf(root:)` | Checks whether a tree contains this process, walking both descendants and our own ancestry | `pauseTree` refuses when true. Freezing ourselves is unrecoverable: the menu bar stops responding, so nothing can be resumed and everything frozen in the same sweep stays frozen. Enforced at the signal layer so it holds no matter what the caller asks for. |
 
@@ -71,9 +71,13 @@ The only mechanism on macOS that frees **all** of an app's memory including swap
   - Returns `.good` / `.fixable` / `.unknown`, which drives the warning sheet.
 - **`enableStateRestoration(bundleID:)`** — writes `NSQuitAlwaysKeepsWindows` into that app's
   domain. Only ever called on explicit consent, and records what it changed so it can be reverted.
-- **`sleep(app:…)`** — thaws the whole tree if any process in it is stopped (a `SIGSTOP`ped
-  process can't process a quit Apple Event, and an app waiting on a frozen helper cannot quit),
-  then `terminate()` — a normal ⌘Q, **never** `forceTerminate`. Polls up to 10 s.
+- **`sleep(app:…)`** — thaws the app's live subprocess records, then the whole tree if the app
+  itself is frozen (stopped or recorded), like `AppListModel.thaw(pid:)`: a `SIGSTOP`ped
+  process can't process a quit Apple Event, and an app waiting on a frozen helper cannot quit,
+  while a stopped job in a terminal app's tree is the user's and stays stopped. Then
+  `terminate()` — a normal ⌘Q, **never** `forceTerminate`. Polls up to 10 s. On `.failed` the
+  model drops the whole-app record once the app is no longer stopped, so a thawed app does not
+  stay listed as paused.
 - **`watchForLateTermination`** — if the app was showing a save sheet and the user answers it
   minutes later, the app quits after we gave up. Without this watcher it would vanish from Pause
   with no way to wake it.
@@ -125,9 +129,15 @@ the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) an
   say a second click is needed. `busySettings` (global, `UserDefaults`) is saved on every change.
 - **Never freeze** - `neverFreeze` (bundle IDs, `NeverFreezeList` in `BusySettings.swift`,
   `UserDefaults` key `PauseNeverFreezeBundleIDs`; absent = defaults, otherwise the full list so a
-  removed default stays removed). Every freeze goes through `freeze(root:bundleID:)`: manual
-  Pause, auto-pause and Free Up Memory. It refuses listed apps and the frontmost app
-  (`frontPid`); there is no Force. Listed apps
+  removed default stays removed). Every freeze goes through `freeze(root:app:bundleID:)`:
+  manual Pause, a single process paused from the process tree, auto-pause and Free Up Memory.
+  It refuses listed apps and the frontmost app (`frontPid`), both checked against the owning
+  app, and any tree that holds another listed app (a dev build started from a VS Code terminal
+  sits under ptyHost; it may be frontmost or on the list itself). A subprocess root must still
+  be in the app's tree, and no process of its subtree may be a Chromium shared role
+  (`AppProcesses.isSharedRole`; a Teams WebView host has no `--type` but its own GPU and
+  network processes below it) or of another user, read from the per-pid label cache. There is
+  no Force. Listed apps
   get no auto-pause timer (`scheduleAutoPause` checks the list before the setting and leaves
   the timer cancelled; a change to the list reschedules every app) and are not Free Up Memory
   candidates. Their stored auto-pause setting is kept, so removing an app from the list
@@ -137,8 +147,10 @@ the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) an
   bundle IDs still flagged `excludedFromReclaim` in `settings.json` (an older Free Up Memory
   opt-out) are appended to the list and the flag cleared
   (`AppSettingsStore.takeExcludedFromReclaim`).
-- **Thaw** - `thaw(pid:)` is the one place a single frozen app is resumed: the whole tree is
-  resumed, its record dropped, its footprint baseline cleared, the pid removed from
+- **Thaw** - `thaw(pid:)` is the one place a single frozen app is resumed: its subprocess
+  records are resumed and dropped, then the whole tree is resumed only if the app itself is
+  frozen whole (stopped or recorded; a stopped job in a terminal app's tree is the user's), its
+  record dropped, its footprint baseline cleared, the pid removed from
   `reclaimSession` (so Restore does not count it), its idle clock reset and its auto-pause timer
   rescheduled (cancelled when it is frontmost). Resume, activation and a Dock click call it;
   Resume All and Restore resume their own sets.
@@ -166,11 +178,44 @@ the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) an
   Pause, so it reads the app in use before the panel opened; with the Settings window open it
   is Auto Pause itself and no listed app is refused.
 
-- **Window records** - `paused.json` can hold window records (`ownerPid` set, no `kind`) from
-  builds that froze single windows. Nothing else would ever wake them, so `resumeWindowRecords()` resumes
-  each one whose pid still has the recorded start time and drops them all at launch, before the
-  first refresh. A window of an app that is itself still frozen is only dropped: resuming the
-  app resumes its whole tree. No code writes window records.
+- **Process tree** - `expanded` (app pids) and `expandedProcesses` (pids whose children are
+  shown) start empty, survive refreshes and closing the panel, and are pruned to live pids.
+  For expanded apps only, each refresh builds `details[pid]` (`AppDetail`) with
+  `detail(for:)`: the tree walked with `children(of:)`, per node `memoryInfo`, `isStopped`, and
+  a name, Chromium role and freezability from `AppProcesses` (cached per pid and start time, so
+  `KERN_PROCARGS2` is read once per process), subtree totals summed bottom-up, children sorted
+  by subtree resident descending. `AppDetail.visible(expanded:)` hides everything below a
+  collapsed node. Nodes carry no history: the view shows live figures only, CPU from
+  `processCPU` of the last live pass (the subtree sum while collapsed). Collapsed rows read
+  `processCount` and `pausedProcesses` from the regular refresh. A node is `freezable` only when
+  it is not the app and no process of its subtree is a shared role, of another user or another
+  listed app: the same test `freeze` applies, so the view hides Pause exactly where `freeze`
+  would refuse.
+- **Subprocess pause** - `pauseProcess(_:of:)` freezes one process and its subtree through
+  `freeze(root:app:bundleID:)` and writes a subprocess record (start time as `launchDate`,
+  `ownerPid` the app pid, `kind` "process"); the first one also posts a one-time notice that
+  the app may wait on it (`PauseFlags.hasSeenProcessPauseNotice`). `resumeProcess(_:)` resumes
+  the subtree and drops every subprocess record inside it. An app with frozen subprocesses
+  stays `.running` (sorted with running apps, "N processes paused" on its row); `pausedCount`,
+  the menu-bar icon and Resume All count it (`AppEntry.hasPaused`). Reclaimed per frozen node
+  is the subtree footprint at freeze minus subtree resident now.
+- **Thaw of subprocesses** - `isFrozen` includes apps with subprocess records, so activation
+  and a Dock click call `thaw(pid:)`, which resumes the subprocess records first and the whole
+  tree only when the app itself is frozen (a stopped job in a terminal app's tree belongs to
+  the user). Whole-app Resume does the same; whole-app Pause keeps the records. Restore of Free
+  Up Memory and Deep Sleep drop them too. `syncExitWatchers()` (every refresh) keeps a
+  `DispatchSource` `.exit` watcher on every unfrozen direct child at least 10 s old (start time
+  from `startTime(of:)`) of an app with subprocess records; its exit resumes all of that app's
+  subprocess records, so a quit from the Dock or the app menu does not hang on a frozen helper.
+  The age limit is a heuristic: short-lived children (a git run, a terminal tab's login) exit
+  without the app quitting and would otherwise thaw everything; a younger child gets its
+  watcher on a later refresh.
+- **Foreign records** - `paused.json` can hold records with `ownerPid` set and a `kind` this
+  build does not know: window records (no `kind`) from builds that froze single windows, or a
+  kind written by a newer build. Nothing else would ever wake them, so `resumeForeignRecords()`
+  resumes each one whose pid still has the recorded start time and drops them all at launch,
+  before the first refresh. One of an app that is itself still frozen is only dropped: resuming
+  the app resumes its whole tree. No code writes them.
 - **Three states** per entry: `.running`, `.paused` (SIGSTOP), `.sleeping` (quit, resumable).
 - **Apps only.** Entries come solely from `NSWorkspace.runningApplications` filtered to
   `.regular`, so daemons never enter the list. Finder is listed (on the Never freeze list by
@@ -183,8 +228,8 @@ the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) an
 - **`restoreReclaimSession()`** — undoes precisely what that run froze, leaving anything you
   froze by hand still frozen.
 - **Notices** - `notice` (`Notice`: text, `isWarning`) is shown above the list until dismissed
-  or replaced. Warnings: a manual Pause that `freeze` refuses (never-freeze, frontmost, or `pauseTree`
-  refusing), a failed wake (also from Wake all), Deep Sleep
+  or replaced. Warnings: a manual Pause that `freeze` refuses (never-freeze, frontmost, another
+  app or a shared role in the tree, or `pauseTree` refusing), a failed wake (also from Wake all), Deep Sleep
   refused or failed, Free Up Memory pausing nothing or skipping apps. Confirmations: Free Up
   Memory ("Paused N apps, up to X reclaimable") and its Restore.
 - **Wake** - `waking` holds the bundle IDs whose relaunch runs; the row shows "Waking..." and
@@ -267,13 +312,24 @@ Only the Dock is asked; it is never frozen. Used by `AppListModel` (Dock click m
 
 ---
 
+## `AppProcesses.swift` - process labels
+
+`executableName(of:)` (`proc_pidpath`), `commandLine(of:)` (argv and environment from
+`KERN_PROCARGS2`; nil for other users, which also marks a process as not freezable),
+`chromiumRole(_:)` (`--type`, or the last part of `--utility-sub-type` for utility processes)
+and `isSharedRole(_:)`: GPU, zygote, broker, crashpad and every utility service except
+Electron's `node.mojom.NodeService` (app code such as VS Code's extension host) serve the whole
+app and are never paused on their own.
+
+---
+
 ## Persistence — three small stores
 
 All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable across the rename — see the naming note below).
 
 | File | Module | Purpose |
 |---|---|---|
-| `paused.json` | `PausedStore.swift` | Frozen apps and processes. A whole-app record has no `ownerPid`. A subprocess record (`kind` "process", `ownerPid` the app pid, the process start time in `launchDate`) holds the root of a subtree frozen on its own; `pruneStale` keeps it while that process lives in its app's tree, and resumes it before dropping it once it left the tree (reparented to launchd after the app quit) or the app is gone. `resumeOrder` lists records with an owner before whole-app records (children resume first); quit, Resume All and the prune resume a subprocess record only while its pid still has the recorded start time. Window records (`ownerPid` set, no `kind`) from builds that froze single windows still decode; they are resumed and dropped at launch. Pid reuse is guarded by launch date / start time. New fields decode with defaults, so older files stay readable. If Pause is killed, frozen apps are still recognised on next launch. |
+| `paused.json` | `PausedStore.swift` | Frozen apps and processes. A whole-app record has no `ownerPid`. A subprocess record (`kind` "process", `ownerPid` the app pid, the process start time in `launchDate`) holds the root of a subtree frozen on its own; `pruneStale` keeps it while that process lives in its app's tree, and resumes it before dropping it once it left the tree (reparented to launchd after the app quit) or the app is gone. `resumeOrder` lists records with an owner before whole-app records (children resume first); quit, Resume All and the prune resume a subprocess record only while its pid still has the recorded start time. Records with `ownerPid` and any other `kind` (window records of older builds without one, or an unknown kind of a newer build) still decode; they are resumed and dropped at launch. Pid reuse is guarded by launch date / start time. New fields decode with defaults, so older files stay readable. If Pause is killed, frozen apps are still recognised on next launch. |
 | `slept.json` | `SleptStore.swift` | Deep-slept apps. **Essential** — a slept app is gone from `runningApplications`, so without this record it would disappear and be unrecoverable. |
 | `settings.json` | `AppSettingsStore.swift` | Per-app idle auto-pause (on/off, minutes), keyed by bundle ID. `excludedFromReclaim` is still decoded, only to migrate it into the Never freeze list. |
 
@@ -283,7 +339,7 @@ All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable acro
 
 | File | Role |
 |---|---|
-| `MenuView.swift` | The panel: ring gauge, "Memory: X used, Y available", system usage graph coloured by the kernel pressure level (green / orange / red; RAM used fraction 0.6 / 0.85 only when the level cannot be read), and the list in two sections: PAUSED / ASLEEP (whichever apply) and APPS. While the pointer is in the list the displayed order is pinned by bundle ID (new rows appended, cleared when the panel closes), so a row that changes state stays under the pointer; the sections re-sort when it leaves. Tags: PAUSED, ASLEEP (deep-slept, memory line "Quit, relaunches on Wake"). Rows show resident memory (footprint is in the detail popover) and, for running apps, "12% CPU" from the live pass, hidden below 0.1 %. The row sparkline draws memory (blue, filled) with the CPU history on top (pink line, `CPUSparklineView` without fill, threshold dashed); paused rows show the memory line only, in gray. Running rows have a state line under the memory line: "Busy: in use, git fetch" in secondary text with an hourglass, or "Idle 12 min, pauses in 3 min", or a blank line before the first pass. Pause and Deep Sleep follow it through `BusyGate`; on a row shown busy both carry an hourglass badge before the first click; when clicked busy, the state line and the button tooltip show the findings and the clicked button turns into an orange Force (`GatedButton`) for 5 s or until the pointer leaves the row (for Deep Sleep this comes before the warning). Orange is used only for Force and warnings (the CPU graphs are pink for that reason). The sparkline sits directly left of the trailing buttons, so all row graphs share one right edge whatever the name or state line. Right edge of every row: details ("Details and auto-pause"), Deep Sleep, main action (Pause, Resume, or a labelled Wake that shows "Waking..." disabled while the relaunch runs); hover highlights the row and hides nothing. Never-freeze apps show a lock icon (not a button, tooltip "On the Never freeze list: never paused. Deep Sleep quits it normally.") instead of Pause and no state line: they are never paused, not automatically, not by Free Up Memory and not by hand, and there is no Force. Deep Sleep quits them normally, only when chosen by hand; its tooltip on such a row reads "quit it normally (it is never paused)". The frontmost app's Pause is disabled and dimmed (tooltip "In use: switch to another app to pause it") and its context menu has no Pause or Force Pause; Deep Sleep stays. Right-click on an app row: Pause or Resume, Deep Sleep or Wake (through the same gate and warning as the buttons; on a row shown busy the items read "Force Pause" and "Force Deep Sleep" and act at once, the state line being the warning), "Auto-pause..." (opens the detail popover; absent for never-freeze apps) and a "Never freeze" toggle. The timer badge next to the name shows auto-pause is on; never-freeze apps get none. Icon-only buttons carry VoiceOver labels with the app name. Notices: warnings orange with `exclamationmark.triangle`, confirmations green with `checkmark.circle`. The list gets an explicit height computed from the row and section counts, capped at the screen height (a `ScrollView` has no intrinsic size, so without an explicit height the window collapses; computing rather than measuring keeps the size stable across refreshes; state lines add their count times a fixed line height). The footer gear closes the panel (`dismiss`, then closing the key window, since `dismiss` is not reliable for a `MenuBarExtra` window) and opens the Settings window: it reads the panel's screen first (the screen whose menu bar was clicked; the pointer may be on another display for Cmd-,), then `openSettings`, then on the next run-loop turn `WindowPlacement.present` on that screen; Cmd-, while the panel is key. Footer: Free Up Memory (`memorychip`), "Resume All (N)" (`resumeAll`, paused apps only; the count is dropped when it does not fit) and, only while apps are deep-slept, "Wake all (N)" (`wakeAll`, relaunches them). |
+| `MenuView.swift` | The panel: ring gauge, "Memory: X used, Y available", system usage graph coloured by the kernel pressure level (green / orange / red; RAM used fraction 0.6 / 0.85 only when the level cannot be read), and the list in two sections: PAUSED / ASLEEP (whichever apply) and APPS. While the pointer is in the list the displayed order is pinned by bundle ID (new rows appended, cleared when the panel closes), so a row that changes state stays under the pointer; the sections re-sort when it leaves. Tags: PAUSED, ASLEEP (deep-slept, memory line "Quit, relaunches on Wake"). Rows show resident memory (footprint is in the detail popover) and, for running apps, "12% CPU" from the live pass, hidden below 0.1 %. The row sparkline draws memory (blue, filled) with the CPU history on top (pink line, `CPUSparklineView` without fill, threshold dashed); paused rows show the memory line only, in gray. Running rows have a state line under the memory line: "Busy: in use, git fetch" in secondary text with an hourglass, or "Idle 12 min, pauses in 3 min", or a blank line before the first pass. Pause and Deep Sleep follow it through `BusyGate`; on a row shown busy both carry an hourglass badge before the first click; when clicked busy, the state line and the button tooltip show the findings and the clicked button turns into an orange Force (`GatedButton`) for 5 s or until the pointer leaves the row (for Deep Sleep this comes before the warning). Orange is used only for Force and warnings (the CPU graphs are pink for that reason). The sparkline sits directly left of the trailing buttons, so all row graphs share one right edge whatever the name or state line. Right edge of every row: details ("Details and auto-pause"), Deep Sleep, main action (Pause, Resume, or a labelled Wake that shows "Waking..." disabled while the relaunch runs); hover highlights the row and hides nothing. Never-freeze apps show a lock icon (not a button, tooltip "On the Never freeze list: never paused. Deep Sleep quits it normally.") instead of Pause and no state line: they are never paused, not automatically, not by Free Up Memory and not by hand, and there is no Force. Deep Sleep quits them normally, only when chosen by hand; its tooltip on such a row reads "quit it normally (it is never paused)". The frontmost app's Pause is disabled and dimmed (tooltip "In use: switch to another app to pause it") and its context menu has no Pause or Force Pause; Deep Sleep stays. Right-click on an app row: Pause or Resume, Deep Sleep or Wake (through the same gate and warning as the buttons; on a row shown busy the items read "Force Pause" and "Force Deep Sleep" and act at once, the state line being the warning), "Auto-pause..." (opens the detail popover; absent for never-freeze apps) and a "Never freeze" toggle. The timer badge next to the name shows auto-pause is on; never-freeze apps get none. Icon-only buttons carry VoiceOver labels with the app name. Notices: warnings orange with `exclamationmark.triangle`, confirmations green with `checkmark.circle`. The list gets an explicit height computed from the row and section counts, capped at the screen height (a `ScrollView` has no intrinsic size, so without an explicit height the window collapses; computing rather than measuring keeps the size stable across refreshes; state lines add their count times a fixed line height). The footer gear closes the panel (`dismiss`, then closing the key window, since `dismiss` is not reliable for a `MenuBarExtra` window) and opens the Settings window: it reads the panel's screen first (the screen whose menu bar was clicked; the pointer may be on another display for Cmd-,), then `openSettings`, then on the next run-loop turn `WindowPlacement.present` on that screen; Cmd-, while the panel is key. Process tree: a chevron left of the icon of every live row toggles `expanded`; the expanded part (`ProcessListView`, `ProcessLine`, 16 pt lines counted into the list height) lists the visible nodes indented by depth with a chevron on nodes that have children, the role, "+N" while collapsed, a pause badge on stopped nodes, "freed X" on frozen ones, then CPU, resident and footprint (subtree totals while collapsed) and Pause or Resume (Pause disabled for the frontmost app, absent for the app node, nodes whose subtree holds a shared role, another user's process or another listed app (`ProcessStat.freezable`), never-freeze apps and stopped nodes; Resume only while the app is not frozen whole). The memory line of a collapsed row adds "12 processes", or "2 processes paused" in blue; the header counts "N processes paused" apart from paused apps. Footer: Free Up Memory (`memorychip`), "Resume All (N)" (`resumeAll`, apps paused whole or with paused processes; the count is dropped when it does not fit) and, only while apps are deep-slept, "Wake all (N)" (`wakeAll`, relaunches them). |
 | `DetailViews.swift` | `SparklineView` (scaled from 0 to the window's maximum, so noise stays small), `CPUSparklineView` (linear from 0 to max(100 %, peak), so an app idling at a fraction of a percent stays flat; the CPU busy threshold, 10 % by default, is drawn as a dashed line while that condition is on), `UsageAreaChart` (plotted against total RAM so normal fluctuation looks normal, not like a mountain range), and the per-app detail popover: "1.2 GB in RAM, 1.5 GB footprint, 12% CPU", memory history, a 60 pt CPU graph (running apps), the live state under the graph (every busy reason one per line, the reasons Force was armed with while armed, or the idle line; none for paused or never-freeze apps), auto-pause settings (for a never-freeze app "On the Never freeze list" in their place, and no Pause) and Pause/Resume through `GatedButton` (hourglass badge while shown busy, Pause disabled for the frontmost app, as in the row). |
 | `SystemDetailView.swift` | Ring gauge (RAM used), "Memory Pressure" with the kernel level (when it cannot be read: "Memory used" with no pressure word), usage history, breakdown bar and rows App, Wired, Compressed, Cached Files, Free, Other (summing to total), then a separated Available (no segment, help text calls it an estimate) and Swap Used, top 6 apps by resident memory (slept apps left out). |
 | `ReclaimView.swift` | Free Up Memory: a reviewable checklist of what will be paused, with running totals, before anything happens. Never-freeze apps are not offered. Busy apps (checked in one pass on open; the confirm button waits for it) start unticked with the reason as subtitle. Recording and call apps start unticked. The header says how many running apps are not offered because of the Never freeze list; the total reads "Up to X reclaimable"; the confirm button uses the default accent. When "Add the unticked apps to Never freeze" is ticked (off by default), the unticked apps that are not busy are appended to `neverFreeze`. |
@@ -291,7 +347,7 @@ All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable acro
 | `BusySettingsView.swift` | Settings > Busy Conditions: one checkbox per condition, CPU threshold, and the editable regex list (invalid entries are marked and not saved). |
 | `NeverFreezeSettingsView.swift` | Settings > Never Freeze: the list with app name and icon where the app is installed (`urlForApplication(withBundleIdentifier:)`), else the bundle ID; remove buttons, "Add running app..." (listed apps not on the list) and "Restore defaults". |
 | `DeepSleepWarningView.swift` | Warning before a Deep Sleep: explains Deep Sleep actually quits the app, reports that app's restore status, offers to enable window restore. Shown every time unless the app's restore status is `.good` and the warning was confirmed once (`PauseFlags.hasSeenDeepSleepWarning`). |
-| `PauseApp.swift` | `MenuBarExtra` and `Settings` scenes plus the `NSApplicationDelegate`. Presents the first-run walkthrough in a real `NSWindow`, and resumes every frozen app on quit so nothing is ever stranded. `WindowPlacement.present` shows the walkthrough and the Settings window: `.moveToActiveSpace` so activation does not switch back to the Space the window was last on, an explicit origin centered on the target screen (default: the screen under the pointer) when the window is hidden or on another screen (`.moveToActiveSpace` keeps the frame, so with several displays the window would stay on the old screen; a window already visible on that screen keeps the position it was dragged to), then `makeKeyAndOrderFront` and `NSApp.activate` (an `LSUIElement` app is not active, so the window would open behind the frontmost app). |
+| `PauseApp.swift` | `MenuBarExtra` and `Settings` scenes plus the `NSApplicationDelegate`. Presents the first-run walkthrough in a real `NSWindow`, and resumes every frozen app and process on quit and on `NSWorkspace.willPowerOffNotification` (logout, restart, shutdown; `resumeEverything`: `resumeOrder`, subprocess records only while live) so nothing is ever stranded. `WindowPlacement.present` shows the walkthrough and the Settings window: `.moveToActiveSpace` so activation does not switch back to the Space the window was last on, an explicit origin centered on the target screen (default: the screen under the pointer) when the window is hidden or on another screen (`.moveToActiveSpace` keeps the frame, so with several displays the window would stay on the old screen; a window already visible on that screen keeps the position it was dragged to), then `makeKeyAndOrderFront` and `NSApp.activate` (an `LSUIElement` app is not active, so the window would open behind the frontmost app). |
 | `OnboardingView.swift` | Five-page animated walkthrough: welcome, the two tiers, Free Up Memory (an illustrated checklist with "up to X can be reclaimed"), resuming a paused app on a Dock click (the Accessibility request: "Allow Accessibility..." shows the system prompt, a link opens the Privacy & Security pane, a check mark once granted; optional), and where to find the app + start-at-login. Exists because a menu-bar-only app with no Dock icon is easy to lose immediately after installing. |
 | `LaunchAtLogin.swift` | `SMAppService.mainApp` wrapper. Registration is idempotent (registering when already enabled throws), and the status is read back afterwards — `register()` can succeed while the item still needs approval, or not take effect when the app runs from a DMG or build folder. |
 

@@ -35,7 +35,8 @@ struct MenuView: View {
                 // An explicit height, not maxHeight: a ScrollView has no intrinsic size, so
                 // the MenuBarExtra window would collapse it.
                 .frame(height: listHeight(sections: [top.count, apps.count],
-                                          stateLines: model.entries.filter(\.showsState).count))
+                                          stateLines: model.entries.filter(\.showsState).count,
+                                          processLists: model.details.values.map { $0.height(expanded: model.expandedProcesses) }.reduce(0, +)))
                 .onHover { inside in
                     pinned = inside ? (top.map(Self.pinKey), apps.map(Self.pinKey)) : nil
                 }
@@ -67,11 +68,15 @@ struct MenuView: View {
     /// bundle ID keeps that row in place.
     private static func pinKey(_ entry: AppEntry) -> String { entry.bundleID ?? entry.id }
 
-    /// "2 paused, 1 asleep", the parts that are not zero.
+    /// "2 paused, 3 processes paused, 1 asleep", the parts that are not zero. Processes count
+    /// only for apps not frozen whole.
     private static func stoppedCounts(_ entries: [AppEntry]) -> [String] {
         let paused = entries.filter { $0.state == .paused }.count
+        let processes = entries.filter { $0.state == .running }.reduce(0) { $0 + $1.pausedProcesses }
         let asleep = entries.filter { $0.state == .sleeping }.count
-        return [paused > 0 ? "\(paused) paused" : nil, asleep > 0 ? "\(asleep) asleep" : nil].compactMap { $0 }
+        return [paused > 0 ? "\(paused) paused" : nil,
+                processes > 0 ? "\(processes) process\(processes == 1 ? "" : "es") paused" : nil,
+                asleep > 0 ? "\(asleep) asleep" : nil].compactMap { $0 }
     }
 
     private static func stoppedTitle(_ entries: [AppEntry]) -> String {
@@ -177,7 +182,7 @@ struct MenuView: View {
                 ReclaimView(model: model) { showReclaim = false }
             }
             Spacer()
-            let resumable = model.entries.filter { $0.state == .paused }.count
+            let resumable = model.entries.filter(\.hasPaused).count
             Button {
                 model.resumeAll()
             } label: {
@@ -237,7 +242,7 @@ struct MenuView: View {
     /// Tall enough for every row, capped at the screen. Computed from row counts with fixed
     /// metrics rather than measured, so the window keeps its size across the periodic refresh
     /// unless the number of rows changes.
-    private func listHeight(sections rowCounts: [Int], stateLines: Int) -> CGFloat {
+    private func listHeight(sections rowCounts: [Int], stateLines: Int, processLists: CGFloat) -> CGFloat {
         let rowHeight: CGFloat = 39    // two text lines + vertical padding
         let stateLineHeight: CGFloat = 13
         let headerHeight: CGFloat = 19 // section title + its padding
@@ -245,7 +250,7 @@ struct MenuView: View {
         let rows = rowCounts.reduce(0, +)
         let headers = rowCounts.filter { $0 > 0 }.count
         let contentHeight = CGFloat(rows) * rowHeight + CGFloat(stateLines) * stateLineHeight
-            + CGFloat(headers) * headerHeight
+            + CGFloat(headers) * headerHeight + processLists
             + CGFloat(max(0, rows + headers - 1)) * spacing
             + 12 // VStack padding
         let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
@@ -281,7 +286,16 @@ private struct AppRow: View {
     @StateObject private var gate = BusyGate()
 
     var body: some View {
-        row.background(
+        VStack(spacing: 0) {
+            row
+            if let pid = entry.pid, let detail = model.details[pid] {
+                ProcessListView(entry: entry, detail: detail, model: model)
+                    .padding(.leading, 30)
+                    .padding(.trailing, 8)
+                    .padding(.bottom, 6)
+            }
+        }
+        .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(hovering ? Color.primary.opacity(0.06) : rowTint)
         )
@@ -291,6 +305,22 @@ private struct AppRow: View {
 
     private var row: some View {
         HStack(spacing: 8) {
+            if let pid = entry.pid {
+                let expanded = model.expanded.contains(pid)
+                Button { model.toggleExpanded(pid) } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 10)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Processes")
+                .accessibilityLabel("\(expanded ? "Hide" : "Show") processes of \(entry.name)")
+            } else {
+                Color.clear.frame(width: 10)
+            }
             if let icon = entry.icon {
                 Image(nsImage: icon)
                     .resizable()
@@ -507,6 +537,12 @@ private struct AppRow: View {
             if entry.state == .running, let percent = entry.pid.flatMap({ model.cpu[$0] }), percent >= 0.1 {
                 Text("\(BusyPass.format(percent))% CPU").font(.system(size: 10)).monospacedDigit()
             }
+            if entry.state == .running, entry.pausedProcesses > 0 {
+                Text("\(entry.pausedProcesses) process\(entry.pausedProcesses == 1 ? "" : "es") paused")
+                    .font(.system(size: 10)).foregroundStyle(.blue)
+            } else if entry.state != .sleeping, entry.processCount > 1 {
+                Text("\(entry.processCount) processes").font(.system(size: 10))
+            }
             if entry.reclaimedBytes > 0 {
                 Text("freed \(MenuView.fmt(entry.reclaimedBytes))")
                     .font(.system(size: 9, weight: .medium))
@@ -668,4 +704,120 @@ final class BusyGate: ObservableObject {
 extension AppEntry {
     /// Rows that can be paused show busy or idle under the memory line.
     var showsState: Bool { state == .running && !neverFreeze }
+}
+
+extension AppDetail {
+    static let lineHeight: CGFloat = 16
+
+    /// Height of the expanded part of a row, from fixed line metrics like `listHeight`.
+    func height(expanded: Set<pid_t>) -> CGFloat {
+        CGFloat(visible(expanded: expanded).count) * Self.lineHeight + 6
+    }
+}
+
+/// The expanded part of an app row: its process tree, every node below the app collapsed until
+/// opened. Each node shows live figures only, no history.
+private struct ProcessListView: View {
+    let entry: AppEntry
+    let detail: AppDetail
+    @ObservedObject var model: AppListModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(detail.visible(expanded: model.expandedProcesses)) {
+                ProcessLine(entry: entry, process: $0, model: model)
+            }
+        }
+    }
+}
+
+/// One node: name, role, "+N" while collapsed, then CPU, resident and footprint (of the
+/// subtree while collapsed, of the process itself otherwise) and Pause or Resume.
+private struct ProcessLine: View {
+    let entry: AppEntry
+    let process: ProcessStat
+    @ObservedObject var model: AppListModel
+
+    private var hasChildren: Bool { process.depth > 0 && process.descendants > 0 }
+    private var collapsed: Bool { hasChildren && !model.expandedProcesses.contains(process.pid) }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            HStack(spacing: 2) {
+                if hasChildren {
+                    Button { model.toggleExpandedProcess(process.pid) } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 7, weight: .semibold))
+                            .rotationEffect(.degrees(collapsed ? 0 : 90))
+                            .frame(width: 8)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(collapsed ? "Show" : "Hide") subprocesses of \(process.name)")
+                } else {
+                    Color.clear.frame(width: 8)
+                }
+                Text(process.name).lineLimit(1).truncationMode(.middle)
+            }
+            .padding(.leading, CGFloat(min(process.depth, 6)) * 8)
+            if let role = process.role, role != process.name {
+                Text(role).lineLimit(1).foregroundStyle(.tertiary)
+            }
+            if collapsed {
+                Text("+\(process.descendants)").foregroundStyle(.tertiary)
+                    .help("\(process.descendants) subprocesses, figures include them")
+            }
+            if process.stopped {
+                Image(systemName: "pause.fill").foregroundStyle(.blue).help("Paused")
+            }
+            if process.reclaimed > 0 {
+                Text("freed \(MenuView.fmt(process.reclaimed))").foregroundStyle(.green)
+            }
+            Spacer(minLength: 4)
+            figures
+            action.frame(width: 14)
+        }
+        .font(.system(size: 9))
+        .foregroundStyle(.secondary)
+        .frame(height: AppDetail.lineHeight)
+    }
+
+    private var figures: some View {
+        let pids = collapsed ? process.subtree : [process.pid]
+        let measured = pids.compactMap { model.processCPU[$0] }
+        return HStack(spacing: 6) {
+            Text(measured.isEmpty ? "-" : BusyPass.format(measured.reduce(0, +)) + "%")
+                .frame(width: 34, alignment: .trailing)
+            Text(MenuView.fmt(collapsed ? process.subtreeResident : process.resident))
+                .frame(width: 50, alignment: .trailing)
+            Text(MenuView.fmt(collapsed ? process.subtreeFootprint : process.footprint))
+                .foregroundStyle(.tertiary)
+                .frame(width: 50, alignment: .trailing)
+                .help("Footprint, incl. compressed and swapped pages")
+        }
+        .monospacedDigit()
+    }
+
+    @ViewBuilder
+    private var action: some View {
+        if process.frozen, entry.state == .running {
+            Button { model.resumeProcess(process.pid) } label: {
+                Image(systemName: "play.circle.fill").font(.system(size: 12)).foregroundStyle(.green)
+            }
+            .buttonStyle(.plain)
+            .help("Resume \(process.name) and its subprocesses")
+            .accessibilityLabel("Resume \(process.name)")
+        } else if process.freezable, !process.stopped, entry.state == .running, !entry.neverFreeze {
+            // The frontmost app's processes are refused like the app; see `AppListModel.freeze`.
+            let inUse = model.isFrontmost(entry.pid)
+            Button { model.pauseProcess(process.pid, of: entry) } label: {
+                Image(systemName: "pause.circle").font(.system(size: 12)).foregroundStyle(.blue)
+            }
+            .buttonStyle(.plain)
+            .disabled(inUse)
+            .opacity(inUse ? 0.35 : 1)
+            .help(inUse ? inUseHelp : "Pause \(process.name) and its subprocesses")
+            .accessibilityLabel("Pause \(process.name)")
+        }
+    }
 }
