@@ -71,8 +71,9 @@ The only mechanism on macOS that frees **all** of an app's memory including swap
   - Returns `.good` / `.fixable` / `.unknown`, which drives the warning sheet.
 - **`enableStateRestoration(bundleID:)`** — writes `NSQuitAlwaysKeepsWindows` into that app's
   domain. Only ever called on explicit consent, and records what it changed so it can be reverted.
-- **`sleep(app:…)`** — thaws the app if frozen (a `SIGSTOP`ped process can't process a quit
-  Apple Event), then `terminate()` — a normal ⌘Q, **never** `forceTerminate`. Polls up to 10 s.
+- **`sleep(app:…)`** — thaws the whole tree if any process in it is stopped (a `SIGSTOP`ped
+  process can't process a quit Apple Event, and an app waiting on a frozen helper cannot quit),
+  then `terminate()` — a normal ⌘Q, **never** `forceTerminate`. Polls up to 10 s.
 - **`watchForLateTermination`** — if the app was showing a save sheet and the user answers it
   minutes later, the app quits after we gave up. Without this watcher it would vanish from Pause
   with no way to wake it.
@@ -165,8 +166,8 @@ the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) an
   Pause, so it reads the app in use before the panel opened; with the Settings window open it
   is Auto Pause itself and no listed app is refused.
 
-- **Window records** - `paused.json` can hold window records (`ownerPid` set) from builds that
-  froze single windows. Nothing else would ever wake them, so `resumeWindowRecords()` resumes
+- **Window records** - `paused.json` can hold window records (`ownerPid` set, no `kind`) from
+  builds that froze single windows. Nothing else would ever wake them, so `resumeWindowRecords()` resumes
   each one whose pid still has the recorded start time and drops them all at launch, before the
   first refresh. A window of an app that is itself still frozen is only dropped: resuming the
   app resumes its whole tree. No code writes window records.
@@ -272,7 +273,7 @@ All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable acro
 
 | File | Module | Purpose |
 |---|---|---|
-| `paused.json` | `PausedStore.swift` | Frozen apps. A whole-app record has no `ownerPid`. Window records (`ownerPid` set, the process start time in `launchDate`) from builds that froze single windows still decode; they are resumed and dropped at launch. Pid reuse is guarded by launch date / start time. New fields decode with defaults, so older files stay readable. If Pause is killed, frozen apps are still recognised on next launch. |
+| `paused.json` | `PausedStore.swift` | Frozen apps and processes. A whole-app record has no `ownerPid`. A subprocess record (`kind` "process", `ownerPid` the app pid, the process start time in `launchDate`) holds the root of a subtree frozen on its own; `pruneStale` keeps it while that process lives in its app's tree, and resumes it before dropping it once it left the tree (reparented to launchd after the app quit) or the app is gone. `resumeOrder` lists records with an owner before whole-app records (children resume first); quit, Resume All and the prune resume a subprocess record only while its pid still has the recorded start time. Window records (`ownerPid` set, no `kind`) from builds that froze single windows still decode; they are resumed and dropped at launch. Pid reuse is guarded by launch date / start time. New fields decode with defaults, so older files stay readable. If Pause is killed, frozen apps are still recognised on next launch. |
 | `slept.json` | `SleptStore.swift` | Deep-slept apps. **Essential** — a slept app is gone from `runningApplications`, so without this record it would disappear and be unrecoverable. |
 | `settings.json` | `AppSettingsStore.swift` | Per-app idle auto-pause (on/off, minutes), keyed by bundle ID. `excludedFromReclaim` is still decoded, only to migrate it into the Never freeze list. |
 

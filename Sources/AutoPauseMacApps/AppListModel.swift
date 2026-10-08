@@ -169,17 +169,18 @@ final class AppListModel: ObservableObject {
                 MainActor.assumeIsolated { self?.syncDockClickMonitor() }
             }
         })
-        resumeWindowRecords()
+        resumeForeignRecords()
         rescheduleAutoPause()
         refresh()
     }
 
-    /// Window records (`ownerPid` set) come from builds that froze single windows. Nothing
-    /// else would ever wake them, so they are resumed and dropped before the first refresh.
-    private func resumeWindowRecords() {
-        for rec in PausedStore.shared.records {
+    /// Records with an owner and a kind this build does not know: window records (no `kind`)
+    /// of builds that froze single windows, or a kind of a newer build. Nothing here would ever
+    /// wake them, so they are resumed and dropped before the first refresh.
+    private func resumeForeignRecords() {
+        for rec in PausedStore.shared.records where rec.isForeign {
             guard let owner = rec.ownerPid else { continue }
-            // A window of an app frozen whole resumes with the app; the pid may belong to
+            // A process of an app frozen whole resumes with the app; the pid may belong to
             // another process by now.
             let ownerFrozen = PausedStore.shared.contains(pid: owner) && ProcessControl.isStopped(owner)
             if !ownerFrozen, rec.isLive { ProcessControl.resumeTree(root: rec.pid) }
@@ -204,6 +205,11 @@ final class AppListModel: ObservableObject {
 
     private func isFrozen(_ pid: pid_t) -> Bool {
         ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid)
+    }
+
+    private func dropRecord(_ pid: pid_t) {
+        PausedStore.shared.remove(pid: pid)
+        footprintAtPause[pid] = nil
     }
 
     /// The one place a single frozen app is resumed: activation, a Dock click and Resume. It
@@ -612,6 +618,10 @@ final class AppListModel: ObservableObject {
         let footprint = entry.footprint
         Task { @MainActor in
             let result = await DeepSleepController.sleep(app: app, name: entry.name, footprint: footprint)
+            // `sleep` thaws the frozen subprocesses before the quit request.
+            for rec in PausedStore.shared.subprocessRecords(owner: pid) where !ProcessControl.isStopped(rec.pid) {
+                dropRecord(rec.pid)
+            }
             switch result {
             case .slept:
                 PausedStore.shared.remove(pid: pid)
@@ -623,6 +633,8 @@ final class AppListModel: ObservableObject {
                 footprintAtPause[pid] = nil
                 notice = Notice(text: "\(entry.name) did not quit (unsaved changes?) and stays open.", isWarning: true)
             case .failed(let message):
+                // `sleep` may have thawed the app before the quit request failed.
+                if !ProcessControl.isStopped(pid) { dropRecord(pid) }
                 notice = Notice(text: "\(entry.name): \(message)", isWarning: true)
             }
             refresh()
@@ -650,9 +662,11 @@ final class AppListModel: ObservableObject {
     }
 
     func resumeAll() {
-        for rec in PausedStore.shared.records {
-            ProcessControl.resumeTree(root: rec.pid)
+        for rec in PausedStore.shared.resumeOrder {
+            // A subprocess record's pid may belong to another process by now.
+            if rec.ownerPid == nil || rec.isLive { ProcessControl.resumeTree(root: rec.pid) }
             PausedStore.shared.remove(pid: rec.pid)
+            footprintAtPause[rec.pid] = nil
         }
         for entry in entries where entry.state == .paused {
             if let pid = entry.pid {

@@ -110,9 +110,15 @@ enum DeepSleepController {
         }
         let pid = app.processIdentifier
 
-        // A SIGSTOP'd process can't handle the quit Apple Event — thaw it first.
-        if ProcessControl.isStopped(pid) {
-            ProcessControl.resumeTree(root: pid)
+        // A SIGSTOP'd process can't handle the quit Apple Event, and an app waiting on a
+        // frozen helper cannot quit either: thaw its frozen subprocesses, then the whole tree
+        // only if the app itself is frozen. A stopped job in a terminal app's tree is the
+        // user's, not ours.
+        let subprocesses = PausedStore.shared.subprocessRecords(owner: pid).filter(\.isLive)
+        let frozenWhole = ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid)
+        for rec in subprocesses { ProcessControl.resumeTree(root: rec.pid) }
+        if frozenWhole { ProcessControl.resumeTree(root: pid) }
+        if frozenWhole || !subprocesses.isEmpty {
             try? await Task.sleep(for: .milliseconds(250))
         }
 
