@@ -314,10 +314,18 @@ the window in use. The extension host alone can still be paused from the plain t
 keeps the window usable while its language servers and agents are frozen. When one process of
 a paused window goes away (a window reloaded by VS Code), the rest of that window resumes.
 
-A paused window is resumed by Resume on its line, by everything that resumes a paused helper
-(see above), and when VS Code comes to the front. A click into a paused window shows a spinning
-cursor; after about 15 seconds VS Code may offer to reopen the window, which loses its unsaved
-state, so resume it first.
+A paused window is resumed by Resume on its line and by everything that resumes a paused
+helper (see above). With Accessibility allowed, a paused window resumes when it gets focus:
+Auto Pause watches which VS Code window has focus (only VS Code, no other app or input) and
+finds it by the workspace folder in its title. The match must be one-to-one: the focused window names
+exactly one window, and no other VS Code window on the current Space names that one too.
+Otherwise the last one-to-one match of the same window counts, and without one every paused
+window of VS Code resumes. VS Code coming to the front resumes only the window in focus.
+Without Accessibility, VS Code coming to the front resumes every paused window, and losing
+Accessibility while VS Code is in front resumes them at once. A click into a paused window that
+does not resume it shows a spinning cursor; after about 15 seconds VS Code may offer to reopen
+the window, which loses its unsaved state, so resume it first. Moving the pointer over a paused
+window or scrolling in it may bring up that offer too.
 
 An app can hang while it waits on a paused helper; the first pause of a single process says so
 once. Helpers that macOS runs as XPC services (WebKit content, GPU and networking processes of
@@ -402,8 +410,9 @@ Auto Pause watches mouse clicks while at least one app is paused, and a click on
 app's Dock icon resumes it before the Dock asks it to come forward, so it opens as usual. The
 permission is asked for on a page of the walkthrough and in **Settings > General > Resume
 paused apps on click**; both also link to System Settings > Privacy & Security >
-Accessibility. Without it, no click is watched and a paused app resumes only from the panel
-or through LaunchServices as above. Cmd-Tab onto a paused app does not resume it either way.
+Accessibility. The same permission lets a paused VS Code window resume when it gets focus
+(see "VS Code windows"). Without it, no click is watched and a paused app resumes only from the
+panel or through LaunchServices as above. Cmd-Tab onto a paused app does not resume it either way.
 
 ### Busy apps stay running
 
@@ -483,7 +492,7 @@ right-click → Open no longer works — use System Settings → Privacy & Secur
 No root, no password, no kernel extension, no entitlements. It uses Unix signals and Apple's
 public `libproc` APIs, which work on processes owned by the same user by design. Everything
 works with no permission. Accessibility is optional and serves only resuming a paused app from
-its Dock icon (see "Resume on click").
+its Dock icon and a paused VS Code window when it gets focus (see "Resume on click").
 
 ### Does pausing an app actually free RAM?
 
@@ -546,7 +555,8 @@ achievable equivalent.
 
 Apple's own guidance is to prefer `libproc` over `task_for_pid()`, which SIP restricts to
 development tools. That's why this needs no entitlements and shows no permission prompt; the
-only one is the optional Accessibility request for resuming a paused app from the Dock.
+only one is the optional Accessibility request for resuming a paused app from the Dock and a
+paused VS Code window on focus.
 
 📖 **[Full architecture — module by module →](docs/ARCHITECTURE.md)**
 

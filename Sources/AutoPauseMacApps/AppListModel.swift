@@ -248,6 +248,10 @@ final class AppListModel: ObservableObject {
     /// Global mouse-down monitor that thaws a paused app whose Dock tile is clicked; installed
     /// only while an app is paused and Accessibility is granted.
     private var dockClickMonitor: Any?
+    /// AX observers for focused-window changes of apps with frozen VS Code windows and of a
+    /// frontmost VS Code; only while Accessibility is granted. Everything that lets a window
+    /// stay frozen while VS Code is in use asks for one, not for the permission.
+    private var focusObservers: [pid_t: AXObserver] = [:]
 
     init() {
         let migrated = AppSettingsStore.shared.takeExcludedFromReclaim().filter { !neverFreeze.contains($0) }
@@ -284,7 +288,8 @@ final class AppListModel: ObservableObject {
         observers.append(DistributedNotificationCenter.default().addObserver(
             forName: Accessibility.trustChangedNotification, object: nil, queue: .main) { [weak self] _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                MainActor.assumeIsolated { self?.syncDockClickMonitor() }
+                // Syncs the Dock click monitor and the focus observers.
+                MainActor.assumeIsolated { self?.refresh() }
             }
         })
         resumeForeignRecords()
@@ -313,7 +318,7 @@ final class AppListModel: ObservableObject {
     private func didActivate(pid: pid_t) {
         frontPid = pid
         if isFrozen(pid) {
-            thaw(pid: pid)
+            thawOnReturn(pid)
         } else {
             lastFrontDate[pid] = Date()
             // Cancels the timer of the frontmost app.
@@ -372,7 +377,76 @@ final class AppListModel: ObservableObject {
         guard let path = Accessibility.dockApplicationURL(at: Accessibility.pointerLocation)?.resolvingSymlinksInPath().path,
               let app = listedApps().first(where: { $0.bundleURL?.resolvingSymlinksInPath().path == path }),
               isFrozen(app.processIdentifier) else { return }
-        thaw(pid: app.processIdentifier)
+        thawOnReturn(app.processIdentifier)
+    }
+
+    /// Activation and a Dock click thaw the app. With Accessibility, frozen VS Code windows
+    /// other than the focused one stay frozen: the focus observer thaws each when it gets focus,
+    /// so other windows can stay frozen while one is in use. Without it, every one thaws.
+    private func thawOnReturn(_ pid: pid_t) {
+        guard watchesFocus(pid), !isFrozenWhole(pid),
+              !PausedStore.shared.windowRecords(owner: pid).isEmpty else {
+            thaw(pid: pid)
+            return
+        }
+        resumeSubprocesses(of: pid, windows: false)
+        lastFrontDate[pid] = Date()
+        scheduleAutoPause(pid)
+        thawFocusedWindow(of: pid)
+    }
+
+    /// A focused-window observer runs for this app.
+    func watchesFocus(_ pid: pid_t?) -> Bool {
+        pid.map { focusObservers[$0] != nil } ?? false
+    }
+
+    /// Keeps a focused-window observer on every app with frozen VS Code windows and on a
+    /// frontmost VS Code (so a window can be paused while it is in use) while Accessibility is
+    /// granted. The observer talks to the main process, which a window freeze never stops; an
+    /// app frozen whole gets none, as AX calls to it would block. A frontmost app with frozen
+    /// windows left without an observer (trust revoked, observer not created) gets them resumed:
+    /// no focus change and no activation would.
+    private func syncFocusObservers() {
+        let windowApps = Set(PausedStore.shared.records.filter(\.isWindow).compactMap(\.ownerPid))
+        var candidates = windowApps
+        if let front = frontPid,
+           NSRunningApplication(processIdentifier: front)?.bundleIdentifier.map(VSCodeWindows.bundleIDs.contains) == true {
+            candidates.insert(front)
+        }
+        let wanted: Set<pid_t> = Accessibility.isTrusted ? candidates.filter { !ProcessControl.isStopped($0) } : []
+        for (pid, observer) in focusObservers where !wanted.contains(pid) {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+            focusObservers[pid] = nil
+        }
+        for pid in wanted where focusObservers[pid] == nil {
+            let callback: AXObserverCallback = { _, element, _, refcon in
+                guard let refcon else { return }
+                var pid: pid_t = 0
+                guard AXUIElementGetPid(element, &pid) == .success else { return }
+                let model = Unmanaged<AppListModel>.fromOpaque(refcon).takeUnretainedValue()
+                MainActor.assumeIsolated { model.thawFocusedWindow(of: pid) }
+            }
+            var observer: AXObserver?
+            guard AXObserverCreate(pid, callback, &observer) == .success, let observer,
+                  AXObserverAddNotification(observer, Accessibility.element(pid: pid),
+                                            kAXFocusedWindowChangedNotification as CFString,
+                                            Unmanaged.passUnretained(self).toOpaque()) == .success else { continue }
+            CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+            focusObservers[pid] = observer
+        }
+        if let front = frontPid, windowApps.contains(front), !watchesFocus(front), !isFrozenWhole(front) {
+            resumeWindows(of: front) { _ in true }
+        }
+    }
+
+    /// Thaws the frozen VS Code window that has focus (`VSCodeWindows.focusedWindow`). A focus
+    /// that cannot be told thaws every frozen window of the app: a frozen window must never stay
+    /// in front.
+    private func thawFocusedWindow(of app: pid_t) {
+        guard !PausedStore.shared.windowRecords(owner: app).isEmpty else { return }
+        let focused = VSCodeWindows.focusedWindow(app: app, in: VSCodeWindows.windows(main: app))
+        resumeWindows(of: app) { focused == nil || $0 == focused?.id }
+        refresh()
     }
 
     /// The idle clock starts when an app leaves the front, not when it came there.
@@ -417,6 +491,8 @@ final class AppListModel: ObservableObject {
 
         PausedStore.shared.pruneStale(currentApps: apps.map { ($0.processIdentifier, $0.launchDate) })
         SleptStore.shared.prune(runningBundleIDs: Set(apps.compactMap(\.bundleIdentifier)))
+        // Before the entries: it may resume windows.
+        syncFocusObservers()
 
         let livePids = Set(apps.map(\.processIdentifier))
         history = history.filter { livePids.contains($0.key) }
@@ -734,7 +810,7 @@ final class AppListModel: ObservableObject {
     /// mapped VS Code window is refused when no other mapped window would keep running
     /// (`leavesNoWindowRunning`), however it is paused.
     private func freeze(root: pid_t, app: pid_t, bundleID: String?, window: Bool = false) -> Bool {
-        guard !isNeverFreeze(bundleID), !isFrontmost(app) || (window && Accessibility.isTrusted) else { return false }
+        guard !isNeverFreeze(bundleID), !isFrontmost(app) || (window && watchesFocus(app)) else { return false }
         let tree = ProcessControl.processTree(root: root)
         let otherApps = Set(listedApps().map(\.processIdentifier)).subtracting([app])
         guard !tree.contains(where: otherApps.contains) else { return false }
@@ -1013,10 +1089,12 @@ final class AppListModel: ObservableObject {
             } else if !windows.contains(where: { $0.id != id && !ProcessControl.isStopped($0.renderer) }) {
                 refusal = "\(window.label) was not paused: one \(entry.name) window always stays running, so quitting \(entry.name) cannot hang on a paused window."
             } else if isFrontmost(app) {
-                let focused = Accessibility.isTrusted
-                    ? Accessibility.focusedWindowTitle(pid: app).flatMap { VSCodeWindows.window(titled: $0, in: windows) }
+                // Nothing but the observer would thaw this window once it gets focus.
+                syncFocusObservers()
+                let focused = watchesFocus(app)
+                    ? VSCodeWindows.focusedWindow(app: app, in: windows)
                     : nil
-                if !Accessibility.isTrusted {
+                if !watchesFocus(app) {
                     refusal = "\(entry.name) is in use, so \(window.label) was not paused. Switch to another app first, or allow Accessibility in Settings."
                 } else if focused == nil || focused?.id == id {
                     refusal = "\(window.label) was not paused: it is the \(entry.name) window in use, or the window in use could not be told apart."
@@ -1077,9 +1155,11 @@ final class AppListModel: ObservableObject {
         }
     }
 
-    /// Resumes the app's subprocess and window records, children before the app.
-    private func resumeSubprocesses(of owner: pid_t) {
-        for rec in PausedStore.shared.partRecords(owner: owner) {
+    /// Resumes the app's subprocess records and, unless `windows` is false, its window records,
+    /// children before the app.
+    private func resumeSubprocesses(of owner: pid_t, windows: Bool = true) {
+        let records = windows ? PausedStore.shared.partRecords(owner: owner) : PausedStore.shared.subprocessRecords(owner: owner)
+        for rec in records {
             // The pid may belong to another process by now.
             if rec.isLive { ProcessControl.resumeTree(root: rec.pid) }
             dropRecord(rec.pid)

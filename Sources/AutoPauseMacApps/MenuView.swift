@@ -903,8 +903,8 @@ private struct WindowLine: View {
             .help("Resume window \(label)")
             .accessibilityLabel("Resume window \(label)")
         } else if !window.stopped, entry.state == .running, !entry.neverFreeze {
-            // Without Accessibility nothing tells which window is in use; see `pauseWindow`.
-            let inUse = model.isFrontmost(entry.pid) && !Accessibility.isTrusted
+            // Without a focus observer nothing tells which window is in use; see `pauseWindow`.
+            let inUse = model.isFrontmost(entry.pid) && !model.watchesFocus(entry.pid)
             let enabled = window.canFreeze && !inUse
             Button { model.pauseWindow(window.id, of: entry) } label: {
                 Image(systemName: "pause.circle").font(.system(size: 12)).foregroundStyle(.blue)

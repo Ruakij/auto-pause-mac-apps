@@ -81,7 +81,7 @@ private struct GeneralSettingsView: View {
                         .buttonStyle(.link)
                 }
             } footer: {
-                Text("Needs Accessibility. With it, clicking a paused app in the Dock resumes it. Without it, a paused app resumes only from the menu-bar panel or when opened through Finder, Spotlight or open -a. Cmd-Tab does not resume it either way.")
+                Text("Needs Accessibility. With it, clicking a paused app in the Dock resumes it, and a paused VS Code window resumes when it gets focus. Without it, a paused app resumes only from the menu-bar panel or when opened through Finder, Spotlight or open -a. Cmd-Tab does not resume it either way.")
             }
 
             Section {

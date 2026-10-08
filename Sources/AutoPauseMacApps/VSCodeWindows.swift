@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import ApplicationServices
 
 /// The processes of one VS Code window: its renderer, its file watcher and its extension host,
 /// frozen together with their descendants.
@@ -165,14 +166,37 @@ enum VSCodeWindows {
         }
     }
 
-    /// The window whose AX title names its workspace folder; nil when none or several do, so
-    /// the caller treats the focus as ambiguous. The folder name must stand alone in the title
-    /// ("svs" does not match "app-svs-apigateway").
-    static func window(titled title: String, in windows: [VSCodeWindow]) -> VSCodeWindow? {
-        let matches = windows.filter { w in
+    /// AX window -> window number, kept from the last time that window matched one-to-one. A
+    /// window keeps both for its lifetime, so the entry stays right while the number is mapped.
+    @MainActor private static var focusCache: [AXUIElement: Int] = [:]
+
+    /// The window that has focus in VS Code; nil when it cannot be told. The focused AX window
+    /// must have exactly one candidate (`candidates`), and no other AX window may have that one
+    /// too. Otherwise the last one-to-one match of the same AX window counts. AX lists only the
+    /// windows of the current Space, so a window on another Space cannot veto a match.
+    @MainActor static func focusedWindow(app: pid_t, in windows: [VSCodeWindow]) -> VSCodeWindow? {
+        let ids = Set(windows.map(\.id))
+        focusCache = focusCache.filter { ids.contains($0.value) }
+        guard let texts = Accessibility.windowTexts(pid: app) else { return nil }
+        let found = candidates(texts.focused, in: windows)
+        if found.count == 1, let window = found.first,
+           !texts.others.contains(where: { candidates($0, in: windows).contains(window) }) {
+            focusCache[texts.focused.element] = window.id
+            return window
+        }
+        return focusCache[texts.focused.element].flatMap { id in windows.first { $0.id == id } }
+    }
+
+    /// The windows an AX window may be. Its title must name the label as a word of its own (not
+    /// preceded or followed by a word character, "." or "-"), so "svs" does not match
+    /// "app-svs-apigateway". The active editor's file is no hint: a window can have files of any
+    /// folder open, including another window's, so an editor named like another window's folder
+    /// leaves two candidates.
+    static func candidates(_ text: Accessibility.WindowText, in windows: [VSCodeWindow]) -> [VSCodeWindow] {
+        guard let title = text.title else { return [] }
+        return windows.filter { w in
             let pattern = #"(?<![\w.-])"# + NSRegularExpression.escapedPattern(for: w.label) + #"(?![\w.-])"#
             return title.range(of: pattern, options: .regularExpression) != nil
         }
-        return matches.count == 1 ? matches[0] : nil
     }
 }

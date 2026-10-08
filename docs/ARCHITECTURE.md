@@ -54,8 +54,8 @@ Everything that talks to the OS about processes. No UI, no state; pure functions
 **Design note — why no entitlements.** Apple's guidance is to use `libproc` (`proc_pid_rusage`,
 `proc_pidinfo`) rather than `task_for_pid()`, which is SIP-restricted to development tools.
 Everything here works on same-user processes with no entitlement, no root, no TCC prompt. The
-one exception is opt-in: Accessibility, for resuming a paused app on a Dock click (see
-`Accessibility.swift`); without it nothing is asked and nothing changes.
+one exception is opt-in: Accessibility, for resuming a paused app on a Dock click and a paused
+VS Code window when it gets focus (see `Accessibility.swift`); without it nothing is asked and nothing changes.
 
 ---
 
@@ -133,7 +133,8 @@ the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) an
   manual Pause, a single process paused from the process tree, a VS Code window, auto-pause
   and Free Up Memory. It refuses listed apps and the frontmost app (`frontPid`), both checked
   against the owning app (for a process of a VS Code window, `window: true`, the frontmost app
-  is allowed while Accessibility is granted; `pauseWindow` then refuses the focused window), and any tree that holds another listed app (a dev build started from a VS Code terminal
+  is allowed while a focus observer runs for it, `watchesFocus`; `pauseWindow` then refuses the
+  focused window), and any tree that holds another listed app (a dev build started from a VS Code terminal
   sits under ptyHost; it may be frontmost or on the list itself). A subprocess root must still
   be in the app's tree, and no process of its subtree may be a Chromium shared role
   (`AppProcesses.isSharedRole`; a Teams WebView host has no `--type` but its own GPU and
@@ -169,10 +170,24 @@ the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) an
   installs a global `.leftMouseDown` monitor while at least one app is paused and Accessibility
   is granted, and removes it otherwise. On a click, `Accessibility.dockApplicationURL(at:)`
   names the application Dock tile under the pointer; if a listed app with that bundle URL is
-  frozen, `thaw(pid:)` resumes it. This runs on mouse-down, before the Dock sends its activation
+  frozen, `thawOnReturn` resumes it. This runs on mouse-down, before the Dock sends its activation
   request on mouse-up, so the resumed app answers that request and comes forward. Cmd-Tab stays
   uncovered: the switcher lives in the Dock process, and no permission yields a notification
   naming the app it is about to activate.
+- **Thaw on return** - activation and a Dock click go through `thawOnReturn(_:)`: it is
+  `thaw(pid:)` (everything of the app) unless a focus observer runs for it (`watchesFocus`), the
+  app is not frozen whole and it has window records. Then it resumes the subprocess records, keeps the window
+  records and calls `thawFocusedWindow(of:)`.
+- **Thaw on window focus** - `syncFocusObservers()` (on every refresh, before the entries are
+  built; a trust change triggers a refresh; `pauseWindow` calls it too) keeps an `AXObserver`
+  for `kAXFocusedWindowChangedNotification` on the main process of every app with window
+  records and of a frontmost VS Code while Accessibility is granted and the main process is not
+  stopped, and removes it otherwise; no global event monitor is involved. When the frontmost
+  app has window records but no observer (trust revoked, observer not created), it resumes
+  them: nothing else would thaw a window focused there. The callback runs on the main run loop
+  and calls `thawFocusedWindow(of:)`: it maps the windows afresh and resumes the window
+  `VSCodeWindows.focusedWindow(app:in:)` names, or every frozen window of the app when it
+  names none, so a frozen window never stays in focus.
 - **Frontmost app** - `frontPid` (`@Published`) is set by `didActivate` and cleared by
   `didDeactivate`, so rows re-render when the front app changes while the panel is open;
   `isFrontmost(_:)` is what `freeze` and the views check. The panel does not activate Auto
@@ -206,9 +221,10 @@ the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) an
   cannot hang on a frozen window; `freeze` enforces the same through `leavesNoWindowRunning` for
   any subtree holding a mapped renderer, so a renderer paused from the plain tree counts too, and
   `detail(for:)` clears `freezable` of such a renderer node), and, while VS Code is
-  frontmost, everything without Accessibility, and the
-  focused window (`Accessibility.focusedWindowTitle` matched by `VSCodeWindows.window(titled:in:)`;
-  an unreadable or ambiguous title refuses too). `freezeWindow` then freezes renderer,
+  frontmost, everything without a focus observer (`syncFocusObservers` is asked for one
+  first), and the
+  focused window (`VSCodeWindows.focusedWindow(app:in:)`; a focus it cannot tell refuses
+  too). `freezeWindow` then freezes renderer,
   extension host and file watcher, each with its subtree, through `freeze(..., window: true)`;
   if one is refused, those already frozen are resumed, except an anchor that had a record
   before (it stays frozen), and every record below a resumed anchor is dropped, so each record
@@ -217,8 +233,9 @@ the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) an
   drops the records of one window. `frozenWindows(of:)` gives `AppEntry.pausedWindows` ("N
   windows paused"), `WindowStat.frozen` and `canFreeze` (another window's renderer runs), which the
   view uses to disable Pause on the last one. Everything that resumes subprocess records
-  (`resumeSubprocesses`, `partRecords`: Resume, activation, Dock click, exit watchers, Restore,
-  Deep Sleep, Resume All, quit) resumes window records too.
+  (`resumeSubprocesses`, `partRecords`: Resume, exit watchers, Restore, Deep Sleep, Resume All,
+  quit) resumes window records too; activation and a Dock click do so only without
+  Accessibility (see "Thaw on return").
 - **Subprocess pause** - `pauseProcess(_:of:)` freezes one process and its subtree through
   `freeze(root:app:bundleID:)` and writes a subprocess record (start time as `launchDate`,
   `ownerPid` the app pid, `kind` "process"); the first one also posts a one-time notice that
@@ -336,7 +353,10 @@ the target answers; a stopped app never does, so no AX call goes to a frozen app
 `dockApplicationURL(at:)`: it checks with `CGWindowListCopyWindowInfo` that the point lies in a
 window of the Dock process at the Dock window level, so a click elsewhere costs no AX call, then
 hit-tests the Dock's AX element and returns `kAXURLAttribute` of an `AXApplicationDockItem`.
-Only the Dock is asked; it is never frozen. Used by `AppListModel` (Dock click monitor),
+Only the Dock is asked; it is never frozen. `windowTexts(pid:)` reads the title of the focused window and of the app's other windows
+(`kAXWindowsAttribute`, which lists only the current Space), with the 0.25 s timeout set on
+each window element too, and asks nothing of a stopped process. Used by `AppListModel` (Dock click
+monitor, VS Code focus observer, the focused-window check of `pauseWindow`),
 `SettingsView` and `OnboardingView`.
 
 ---
@@ -360,8 +380,15 @@ claimed twice is dropped. Command line and environment are read once per pid and
 the open files of an extension host once its window number is found; only the working
 directories of the fallback label are read on every call. `AppProcesses.commandLine(of:envKeys:)`
 decodes only the two variables asked for and skips the rest of the environment.
-`window(titled:in:)` returns the one window whose label stands alone in a title (not inside a
-longer name), nil when none or several match.
+`candidates(_:in:)` lists the windows an AX window may be: its label stands alone in the title
+(not inside a longer name, so "svs" does not match "app-svs-apigateway"). The active editor's
+file is not used: a window can have files of any folder open, another window's included, so it
+could name the wrong window. An editor named like another window's folder leaves two
+candidates, so the match is not one-to-one. `focusedWindow(app:in:)` returns the focused AX window's only candidate when no other AX
+window has it as a candidate too (one-to-one over the windows of the current Space), and
+caches AX window -> window number; when the match is not one-to-one, the cached number of the
+same AX window counts while it is still mapped (both stay fixed for a window's lifetime), else
+nil. Called only on a focus change, on activation and by `pauseWindow`.
 
 ---
 

@@ -54,16 +54,32 @@ enum Accessibility {
         return url as? URL
     }
 
-    /// Title of the app's focused window; nil when it has none, does not answer or is stopped.
-    static func focusedWindowTitle(pid: pid_t) -> String? {
+    /// Title of one window, answered by the app's main process.
+    struct WindowText {
+        let element: AXUIElement
+        let title: String?
+    }
+
+    /// The app's focused window and its other windows. AX lists only the windows of the
+    /// current Space; windows on other Spaces are missing from `others`. Nil when the app has
+    /// no focused window, does not answer or is stopped.
+    static func windowTexts(pid: pid_t) -> (focused: WindowText, others: [WindowText])? {
         guard !ProcessControl.isStopped(pid) else { return nil }
-        var window: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element(pid: pid), kAXFocusedWindowAttribute as CFString, &window) == .success,
-              let window, CFGetTypeID(window) == AXUIElementGetTypeID() else { return nil }
+        let app = element(pid: pid)
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        let focusedWindow = focused as! AXUIElement
+        var list: CFTypeRef?
+        AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &list)
+        let others = ((list as? [AXUIElement]) ?? []).filter { !CFEqual($0, focusedWindow) }
+        return (text(of: focusedWindow), others.map(text))
+    }
+
+    private static func text(of window: AXUIElement) -> WindowText {
         // The timeout is per element; a new one starts with the default 6 s.
-        let element = window as! AXUIElement
-        AXUIElementSetMessagingTimeout(element, 0.25)
-        return string(element, kAXTitleAttribute)
+        AXUIElementSetMessagingTimeout(window, 0.25)
+        return WindowText(element: window, title: string(window, kAXTitleAttribute))
     }
 
     private static func string(_ element: AXUIElement, _ attribute: String) -> String? {
