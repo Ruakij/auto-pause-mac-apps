@@ -54,6 +54,18 @@ enum Accessibility {
         return url as? URL
     }
 
+    /// Title of the app's focused window; nil when it has none, does not answer or is stopped.
+    static func focusedWindowTitle(pid: pid_t) -> String? {
+        guard !ProcessControl.isStopped(pid) else { return nil }
+        var window: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element(pid: pid), kAXFocusedWindowAttribute as CFString, &window) == .success,
+              let window, CFGetTypeID(window) == AXUIElementGetTypeID() else { return nil }
+        // The timeout is per element; a new one starts with the default 6 s.
+        let element = window as! AXUIElement
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        return string(element, kAXTitleAttribute)
+    }
+
     private static func string(_ element: AXUIElement, _ attribute: String) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }

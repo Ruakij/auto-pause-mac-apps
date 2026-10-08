@@ -26,10 +26,13 @@ struct AppEntry: Identifiable, Equatable {
     var processCount = 1
     /// Subtrees of the app frozen on their own (subprocess records).
     var pausedProcesses = 0
+    /// VS Code windows frozen on their own (window records).
+    var pausedWindows = 0
 
     var canDeepSleep: Bool { state != .sleeping }
-    /// Frozen whole or with some processes frozen: Resume All and the menu-bar icon count it.
-    var hasPaused: Bool { state == .paused || pausedProcesses > 0 }
+    /// Frozen whole or with some processes or windows frozen: Resume All and the menu-bar icon
+    /// count it.
+    var hasPaused: Bool { state == .paused || pausedProcesses > 0 || pausedWindows > 0 }
 }
 
 /// One process of an expanded row.
@@ -50,8 +53,9 @@ struct ProcessStat: Identifiable, Equatable {
     /// Frozen on its own: a subprocess record holds it.
     let frozen: Bool
     /// May be paused on its own: not the app process, and no process of its subtree is a
-    /// Chromium shared role, of another user or another listed app.
-    let freezable: Bool
+    /// Chromium shared role, of another user or another listed app; a VS Code renderer only
+    /// while another window keeps running.
+    var freezable: Bool
     /// Footprint at freeze minus subtree resident now, for frozen nodes.
     let reclaimed: UInt64
     /// The VS Code window this node belongs to, with its subtree.
@@ -66,6 +70,14 @@ struct WindowStat: Identifiable, Equatable {
     let pids: [pid_t]
     let resident: UInt64
     let footprint: UInt64
+    /// Window records hold it.
+    let frozen: Bool
+    /// Its renderer is stopped.
+    let stopped: Bool
+    /// Another mapped window of the app has a running renderer.
+    let canFreeze: Bool
+    /// Footprint at freeze minus resident now, for frozen windows.
+    let reclaimed: UInt64
     var id: Int { window.id }
 }
 
@@ -309,9 +321,9 @@ final class AppListModel: ObservableObject {
         }
     }
 
-    /// Frozen whole, or with subprocesses frozen on their own.
+    /// Frozen whole, or with subprocesses or windows frozen on their own.
     private func isFrozen(_ pid: pid_t) -> Bool {
-        isFrozenWhole(pid) || !PausedStore.shared.subprocessRecords(owner: pid).isEmpty
+        isFrozenWhole(pid) || !PausedStore.shared.partRecords(owner: pid).isEmpty
     }
 
     private func isFrozenWhole(_ pid: pid_t) -> Bool {
@@ -324,7 +336,7 @@ final class AppListModel: ObservableObject {
     }
 
     /// The one place a single frozen app is resumed: activation, a Dock click and Resume. Its
-    /// frozen subprocesses resume first, then the app if it is frozen whole. It leaves the Free
+    /// frozen subprocesses and windows resume first, then the app if it is frozen whole. It leaves the Free
     /// Up Memory run too, so Restore does not count it.
     private func thaw(pid: pid_t) {
         resumeSubprocesses(of: pid)
@@ -459,7 +471,8 @@ final class AppListModel: ObservableObject {
                 history: history[pid] ?? [],
                 neverFreeze: isNeverFreeze(app.bundleIdentifier),
                 processCount: tree.count,
-                pausedProcesses: PausedStore.shared.subprocessRecords(owner: pid).count
+                pausedProcesses: PausedStore.shared.subprocessRecords(owner: pid).count,
+                pausedWindows: frozenWindows(of: pid).count
             ))
         }
 
@@ -715,17 +728,33 @@ final class AppListModel: ObservableObject {
     /// app may be frontmost or on the list itself. A subprocess must still be in the app's
     /// tree, and no process below it may be a Chromium shared role (which would stall every
     /// window) or belong to another user. `pauseTree` keeps its own guard against freezing
-    /// this process or one of its ancestors.
-    private func freeze(root: pid_t, app: pid_t, bundleID: String?) -> Bool {
-        guard !isNeverFreeze(bundleID), !isFrontmost(app) else { return false }
+    /// this process or one of its ancestors. A process of a VS Code window (`window`) may be
+    /// frozen while VS Code is frontmost if Accessibility is granted: focusing that window
+    /// thaws it, and `pauseWindow` refuses the focused one. A subtree holding the renderer of a
+    /// mapped VS Code window is refused when no other mapped window would keep running
+    /// (`leavesNoWindowRunning`), however it is paused.
+    private func freeze(root: pid_t, app: pid_t, bundleID: String?, window: Bool = false) -> Bool {
+        guard !isNeverFreeze(bundleID), !isFrontmost(app) || (window && Accessibility.isTrusted) else { return false }
         let tree = ProcessControl.processTree(root: root)
         let otherApps = Set(listedApps().map(\.processIdentifier)).subtracting([app])
         guard !tree.contains(where: otherApps.contains) else { return false }
         if root != app {
             guard ProcessControl.processTree(root: app).contains(root),
-                  tree.allSatisfy({ label(of: $0).freezable }) else { return false }
+                  tree.allSatisfy({ label(of: $0).freezable }),
+                  !leavesNoWindowRunning(tree, app: app, bundleID: bundleID) else { return false }
         }
         return ProcessControl.pauseTree(root: root)
+    }
+
+    /// True when `tree` holds the renderer of a mapped VS Code window and no other mapped window
+    /// has a running renderer. A quit closes every window, and only a running renderer exits at
+    /// once and trips the exit watcher, so one window always stays running.
+    private func leavesNoWindowRunning(_ tree: [pid_t], app: pid_t, bundleID: String?) -> Bool {
+        guard bundleID.map(VSCodeWindows.bundleIDs.contains) == true else { return false }
+        let windows = VSCodeWindows.windows(main: app)
+        let subtree = Set(tree)
+        guard windows.contains(where: { subtree.contains($0.renderer) }) else { return false }
+        return !windows.contains { !subtree.contains($0.renderer) && !ProcessControl.isStopped($0.renderer) }
     }
 
     // MARK: - Actions
@@ -762,8 +791,8 @@ final class AppListModel: ObservableObject {
         let footprint = entry.footprint
         Task { @MainActor in
             let result = await DeepSleepController.sleep(app: app, name: entry.name, footprint: footprint)
-            // `sleep` thaws the frozen subprocesses before the quit request.
-            for rec in PausedStore.shared.subprocessRecords(owner: pid) where !ProcessControl.isStopped(rec.pid) {
+            // `sleep` thaws the frozen subprocesses and windows before the quit request.
+            for rec in PausedStore.shared.partRecords(owner: pid) where !ProcessControl.isStopped(rec.pid) {
                 dropRecord(rec.pid)
             }
             switch result {
@@ -868,12 +897,20 @@ final class AppListModel: ObservableObject {
             node.window = windowOf[chunks.last?.first?.pid ?? node.pid]
             chunks[chunks.count - 1].append(node)
         }
+        let frozen = frozenWindows(of: app)
         let stats = windows.map { w in
             let members = chunks.filter { $0.first?.window == w.id }.flatMap { $0 }
-            return WindowStat(window: w, pids: members.map(\.pid),
-                              resident: members.reduce(0) { $0 + $1.resident },
-                              footprint: members.reduce(0) { $0 + $1.footprint })
+            let resident = members.reduce(0) { $0 + $1.resident }
+            let atPause = w.anchors.compactMap { footprintAtPause[$0] }.reduce(0, +)
+            return WindowStat(window: w, pids: members.map(\.pid), resident: resident,
+                              footprint: members.reduce(0) { $0 + $1.footprint },
+                              frozen: frozen.contains(w.id), stopped: ProcessControl.isStopped(w.renderer),
+                              canFreeze: windows.contains { $0.id != w.id && !ProcessControl.isStopped($0.renderer) },
+                              reclaimed: frozen.contains(w.id) && atPause > resident ? atPause - resident : 0)
         }.sorted { $0.resident > $1.resident }
+        // A renderer paused from the plain tree counts like its window (`leavesNoWindowRunning`).
+        let canFreeze = Dictionary(uniqueKeysWithValues: stats.map { ($0.window.renderer, $0.canFreeze) })
+        for c in chunks.indices { chunks[c][0].freezable = chunks[c][0].freezable && canFreeze[chunks[c][0].pid] != false }
         let grouped = stats.flatMap { s in chunks.filter { $0.first?.window == s.id }.flatMap { $0 } }
         return AppDetail(processes: [nodes[0]] + grouped + chunks.filter { $0.first?.window == nil }.flatMap { $0 },
                          windows: stats)
@@ -956,9 +993,93 @@ final class AppListModel: ObservableObject {
         refresh()
     }
 
-    /// Resumes the app's subprocess records, children before the app.
+    /// Window numbers of the app's frozen VS Code windows.
+    private func frozenWindows(of app: pid_t) -> Set<Int> {
+        Set(PausedStore.shared.windowRecords(owner: app).compactMap(\.window))
+    }
+
+    /// Pauses one VS Code window: renderer, extension host and file watcher, each with its
+    /// subtree, through `freeze`, one window record each. Refused for the last window of VS
+    /// Code that is not frozen: a quit closes the windows, and only an unfrozen renderer exits
+    /// at once and trips the exit watcher. While VS Code is frontmost it needs Accessibility and
+    /// a focused window that is another one: nothing would thaw the window in use.
+    func pauseWindow(_ id: Int, of entry: AppEntry) {
+        guard let app = entry.pid else { return }
+        let windows = VSCodeWindows.windows(main: app)
+        var refusal: String?
+        if let window = windows.first(where: { $0.id == id }) {
+            if isNeverFreeze(entry.bundleID) {
+                refusal = "\(entry.name) is on the Never freeze list; none of its windows are paused."
+            } else if !windows.contains(where: { $0.id != id && !ProcessControl.isStopped($0.renderer) }) {
+                refusal = "\(window.label) was not paused: one \(entry.name) window always stays running, so quitting \(entry.name) cannot hang on a paused window."
+            } else if isFrontmost(app) {
+                let focused = Accessibility.isTrusted
+                    ? Accessibility.focusedWindowTitle(pid: app).flatMap { VSCodeWindows.window(titled: $0, in: windows) }
+                    : nil
+                if !Accessibility.isTrusted {
+                    refusal = "\(entry.name) is in use, so \(window.label) was not paused. Switch to another app first, or allow Accessibility in Settings."
+                } else if focused == nil || focused?.id == id {
+                    refusal = "\(window.label) was not paused: it is the \(entry.name) window in use, or the window in use could not be told apart."
+                }
+            }
+            if refusal == nil {
+                refusal = freezeWindow(window, app: app, bundleID: entry.bundleID)
+            }
+        } else {
+            refusal = "That \(entry.name) window could not be paused: it closed or its processes changed."
+        }
+        if let refusal {
+            notice = Notice(text: refusal, isWarning: true)
+        }
+        refresh()
+    }
+
+    /// Freezes and records the window's processes; on a refusal resumes those already frozen
+    /// and returns why. An anchor frozen on its own before (a record holds it) stays frozen; any
+    /// record below a resumed anchor is dropped, so every record still holds a stopped process.
+    private func freezeWindow(_ window: VSCodeWindow, app: pid_t, bundleID: String?) -> String? {
+        var done: [pid_t] = []
+        let recorded = Set(PausedStore.shared.records.map(\.pid))
+        for pid in window.anchors {
+            let footprint = ProcessControl.treeMemory(root: pid).footprint
+            guard freeze(root: pid, app: app, bundleID: bundleID, window: true) else {
+                for frozen in done.reversed() where !recorded.contains(frozen) {
+                    let subtree = Set(ProcessControl.processTree(root: frozen))
+                    ProcessControl.resumeTree(root: frozen)
+                    footprintAtPause[frozen] = nil
+                    for rec in PausedStore.shared.records where rec.isPart && subtree.contains(rec.pid) {
+                        dropRecord(rec.pid)
+                    }
+                }
+                return "\(window.label) could not be paused: a process quit, one of its processes is another app, or Auto Pause runs inside it."
+            }
+            footprintAtPause[pid] = footprint
+            done.append(pid)
+        }
+        for pid in window.anchors {
+            PausedStore.shared.add(PausedRecord(
+                pid: pid, bundleID: bundleID, name: window.label, launchDate: ProcessControl.startTime(of: pid),
+                ownerPid: app, kind: PausedRecord.windowKind, window: window.id))
+        }
+        return nil
+    }
+
+    /// Resumes one frozen VS Code window.
+    func resumeWindow(_ id: Int, of app: pid_t) {
+        resumeWindows(of: app) { $0 == id }
+        refresh()
+    }
+
+    private func resumeWindows(of app: pid_t, where matches: (Int) -> Bool) {
+        for rec in PausedStore.shared.windowRecords(owner: app) where rec.window.map(matches) == true {
+            if rec.isLive { ProcessControl.resumeTree(root: rec.pid) }
+            dropRecord(rec.pid)
+        }
+    }
+
+    /// Resumes the app's subprocess and window records, children before the app.
     private func resumeSubprocesses(of owner: pid_t) {
-        for rec in PausedStore.shared.subprocessRecords(owner: owner) {
+        for rec in PausedStore.shared.partRecords(owner: owner) {
             // The pid may belong to another process by now.
             if rec.isLive { ProcessControl.resumeTree(root: rec.pid) }
             dropRecord(rec.pid)
@@ -967,8 +1088,10 @@ final class AppListModel: ObservableObject {
 
     /// An app quitting from the Dock or its menu may wait for a frozen helper and hang. There
     /// is no notification for another app starting to quit, but its unfrozen helpers exit at
-    /// once, so the exit of an unfrozen direct child thaws the app's frozen subprocesses. A
-    /// helper restarting does the same, which costs one re-freeze.
+    /// once, so the exit of an unfrozen direct child thaws the app's frozen subprocesses and
+    /// windows. A helper restarting or a VS Code window closing does the same, which costs one
+    /// re-freeze. VS Code keeps at least one window unfrozen (`pauseWindow`), so a quit always
+    /// has an unfrozen renderer to exit.
     private func syncExitWatchers() {
         // ponytail: age heuristic. Short-lived children (a git run, a terminal tab's login)
         // would thaw everything on exit; only children alive this long count as helpers. A
@@ -977,10 +1100,14 @@ final class AppListModel: ObservableObject {
         let minAge: TimeInterval = 10
         let now = Date()
         var wanted: [pid_t: pid_t] = [:]
-        for owner in Set(PausedStore.shared.records.filter(\.isSubprocess).compactMap(\.ownerPid)) {
+        for owner in Set(PausedStore.shared.records.filter(\.isPart).compactMap(\.ownerPid)) {
+            // Window processes are helpers by role: a window closed or reopened within the first
+            // seconds must thaw too, or the quit would wait on a frozen window.
+            let isVSCode = NSRunningApplication(processIdentifier: owner)?.bundleIdentifier.map(VSCodeWindows.bundleIDs.contains) == true
+            let anchors = isVSCode ? Set(VSCodeWindows.windows(main: owner).flatMap(\.anchors)) : []
             for child in ProcessControl.children(of: owner) where !ProcessControl.isStopped(child) {
                 guard let start = ProcessControl.startTime(of: child),
-                      now.timeIntervalSince(start) >= minAge else { continue }
+                      anchors.contains(child) || now.timeIntervalSince(start) >= minAge else { continue }
                 wanted[child] = owner
             }
         }

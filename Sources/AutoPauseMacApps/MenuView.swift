@@ -68,13 +68,15 @@ struct MenuView: View {
     /// bundle ID keeps that row in place.
     private static func pinKey(_ entry: AppEntry) -> String { entry.bundleID ?? entry.id }
 
-    /// "2 paused, 3 processes paused, 1 asleep", the parts that are not zero. Processes count
-    /// only for apps not frozen whole.
+    /// "2 paused, 1 window paused, 3 processes paused, 1 asleep", the parts that are not zero.
+    /// Windows and processes count only for apps not frozen whole.
     private static func stoppedCounts(_ entries: [AppEntry]) -> [String] {
         let paused = entries.filter { $0.state == .paused }.count
+        let windows = entries.filter { $0.state == .running }.reduce(0) { $0 + $1.pausedWindows }
         let processes = entries.filter { $0.state == .running }.reduce(0) { $0 + $1.pausedProcesses }
         let asleep = entries.filter { $0.state == .sleeping }.count
         return [paused > 0 ? "\(paused) paused" : nil,
+                windows > 0 ? "\(windows) window\(windows == 1 ? "" : "s") paused" : nil,
                 processes > 0 ? "\(processes) process\(processes == 1 ? "" : "es") paused" : nil,
                 asleep > 0 ? "\(asleep) asleep" : nil].compactMap { $0 }
     }
@@ -537,10 +539,14 @@ private struct AppRow: View {
             if entry.state == .running, let percent = entry.pid.flatMap({ model.cpu[$0] }), percent >= 0.1 {
                 Text("\(BusyPass.format(percent))% CPU").font(.system(size: 10)).monospacedDigit()
             }
+            if entry.state == .running, entry.pausedWindows > 0 {
+                Text("\(entry.pausedWindows) window\(entry.pausedWindows == 1 ? "" : "s") paused")
+                    .font(.system(size: 10)).foregroundStyle(.blue)
+            }
             if entry.state == .running, entry.pausedProcesses > 0 {
                 Text("\(entry.pausedProcesses) process\(entry.pausedProcesses == 1 ? "" : "es") paused")
                     .font(.system(size: 10)).foregroundStyle(.blue)
-            } else if entry.state != .sleeping, entry.processCount > 1 {
+            } else if entry.state != .sleeping, entry.pausedWindows == 0, entry.processCount > 1 {
                 Text("\(entry.processCount) processes").font(.system(size: 10))
             }
             if entry.reclaimedBytes > 0 {
@@ -856,9 +862,15 @@ private struct WindowLine: View {
             if collapsed {
                 Text("\(window.pids.count) processes").foregroundStyle(.tertiary)
             }
+            if window.stopped {
+                Image(systemName: "pause.fill").foregroundStyle(.blue).help("Paused")
+            }
+            if window.reclaimed > 0 {
+                Text("freed \(MenuView.fmt(window.reclaimed))").foregroundStyle(.green)
+            }
             Spacer(minLength: 4)
             figures
-            Color.clear.frame(width: 14)
+            action.frame(width: 14)
         }
         .font(.system(size: 9))
         .foregroundStyle(.secondary)
@@ -878,5 +890,32 @@ private struct WindowLine: View {
                 .help("Footprint, incl. compressed and swapped pages")
         }
         .monospacedDigit()
+    }
+
+    @ViewBuilder
+    private var action: some View {
+        let label = window.window.label
+        if window.frozen, entry.state == .running, let pid = entry.pid {
+            Button { model.resumeWindow(window.id, of: pid) } label: {
+                Image(systemName: "play.circle.fill").font(.system(size: 12)).foregroundStyle(.green)
+            }
+            .buttonStyle(.plain)
+            .help("Resume window \(label)")
+            .accessibilityLabel("Resume window \(label)")
+        } else if !window.stopped, entry.state == .running, !entry.neverFreeze {
+            // Without Accessibility nothing tells which window is in use; see `pauseWindow`.
+            let inUse = model.isFrontmost(entry.pid) && !Accessibility.isTrusted
+            let enabled = window.canFreeze && !inUse
+            Button { model.pauseWindow(window.id, of: entry) } label: {
+                Image(systemName: "pause.circle").font(.system(size: 12)).foregroundStyle(.blue)
+            }
+            .buttonStyle(.plain)
+            .disabled(!enabled)
+            .opacity(enabled ? 1 : 0.35)
+            .help(!window.canFreeze ? "One window always stays running, so quitting \(entry.name) cannot hang"
+                  : inUse ? "In use: switch to another app to pause a window, or allow Accessibility in Settings"
+                  : "Pause window \(label) with its extension host and file watcher")
+            .accessibilityLabel("Pause window \(label)")
+        }
     }
 }

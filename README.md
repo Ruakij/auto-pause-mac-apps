@@ -303,6 +303,22 @@ process type and parent variables are read; the rest is skipped, not kept. Each 
 once. Nothing is started for it (no `code --status`). Processes that do not fit, for example when two windows opened within the
 same two seconds, stay in the plain tree.
 
+Pause on a window line freezes that window's renderer, file watcher and extension host with
+everything below them; the other windows keep working. The row shows "N windows paused".
+One window of VS Code always stays running: quitting VS Code closes every window, and only a
+running window closes at once, which is how Auto Pause notices the quit and resumes the paused
+ones before VS Code waits on them. This holds for a window's process paused from the plain tree
+too: the renderer of the last running window cannot be paused there either. While VS Code is in
+use, a window can be paused only with Accessibility allowed (see "Resume on click"), and never
+the window in use. The extension host alone can still be paused from the plain tree, which
+keeps the window usable while its language servers and agents are frozen. When one process of
+a paused window goes away (a window reloaded by VS Code), the rest of that window resumes.
+
+A paused window is resumed by Resume on its line, by everything that resumes a paused helper
+(see above), and when VS Code comes to the front. A click into a paused window shows a spinning
+cursor; after about 15 seconds VS Code may offer to reopen the window, which loses its unsaved
+state, so resume it first.
+
 An app can hang while it waits on a paused helper; the first pause of a single process says so
 once. Helpers that macOS runs as XPC services (WebKit content, GPU and networking processes of
 Safari, Mail and every app using a web view) are not children of the app and are not listed.
