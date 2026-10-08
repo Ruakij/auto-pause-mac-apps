@@ -319,8 +319,20 @@ Each app has its own timer, counted from the moment it left the front, and it fi
 not the panel is open. A busy app (see below) is not frozen; it is checked again every minute
 until it is idle. The first check of an app measures no CPU yet: it takes a sample and judges
 CPU 30 seconds later. While the camera is in use, screen sharing or Sidecar is active, nothing is
-auto-paused. Bringing any frozen app to the front (Dock click, Cmd-Tab, `open -a`) thaws it,
-however it was frozen.
+auto-paused. A frozen app thaws, however it was frozen, when it is resumed in the panel or
+opened through LaunchServices (`open -a`, Spotlight, a double-click in Finder). A Dock click
+thaws it only with the optional Accessibility permission (see below); Cmd-Tab does not.
+
+### Resume on click (optional Accessibility)
+
+A paused app cannot answer a request to come forward, and a Dock click or Cmd-Tab is such a
+request: without help the app stays frozen and nothing happens. With Accessibility granted,
+Auto Pause watches mouse clicks while at least one app is paused, and a click on a paused
+app's Dock icon resumes it before the Dock asks it to come forward, so it opens as usual. The
+permission is asked for on a page of the walkthrough and in **Settings > General > Resume
+paused apps on click**; both also link to System Settings > Privacy & Security >
+Accessibility. Without it, no click is watched and a paused app resumes only from the panel
+or through LaunchServices as above. Cmd-Tab onto a paused app does not resume it either way.
 
 ### Busy apps stay running
 
@@ -398,8 +410,9 @@ right-click → Open no longer works — use System Settings → Privacy & Secur
 ### Does it need root, a password, or special permissions?
 
 No root, no password, no kernel extension, no entitlements. It uses Unix signals and Apple's
-public `libproc` APIs, which work on processes owned by the same user by design. It asks for no
-permission.
+public `libproc` APIs, which work on processes owned by the same user by design. Everything
+works with no permission. Accessibility is optional and serves only resuming a paused app from
+its Dock icon (see "Resume on click").
 
 ### Does pausing an app actually free RAM?
 
@@ -460,7 +473,8 @@ achievable equivalent.
 | Wake | `NSWorkspace.openApplication` |
 
 Apple's own guidance is to prefer `libproc` over `task_for_pid()`, which SIP restricts to
-development tools. That's why this needs no entitlements and shows no permission prompt.
+development tools. That's why this needs no entitlements and shows no permission prompt; the
+only one is the optional Accessibility request for resuming a paused app from the Dock.
 
 📖 **[Full architecture — module by module →](docs/ARCHITECTURE.md)**
 
@@ -469,6 +483,8 @@ development tools. That's why this needs no entitlements and shows no permission
 ## Known limitations
 
 - A frozen app beachballs if you click it and shows "Not Responding" in Activity Monitor. Expected.
+- Cmd-Tab onto a paused app does not resume it, with or without Accessibility: the switcher asks
+  the app itself to come forward. Resume it from the panel or its Dock icon.
 - Don't freeze an app mid-call or mid-upload — network connections will drop.
 - Window-restore quality after Deep Sleep varies by app. Browsers use their own "Continue where
   you left off" setting instead of macOS's, and the app checks it for you.

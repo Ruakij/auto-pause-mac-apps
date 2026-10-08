@@ -127,6 +127,9 @@ final class AppListModel: ObservableObject {
     /// just deactivated can still read true. Published because rows disable Pause for it.
     @Published private(set) var frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
     private var observers: [NSObjectProtocol] = []
+    /// Global mouse-down monitor that thaws a paused app whose Dock tile is clicked; installed
+    /// only while an app is paused and Accessibility is granted.
+    private var dockClickMonitor: Any?
 
     init() {
         let migrated = AppSettingsStore.shared.takeExcludedFromReclaim().filter { !neverFreeze.contains($0) }
@@ -160,6 +163,12 @@ final class AppListModel: ObservableObject {
                                              object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.rescheduleAutoPause() }
         })
+        observers.append(DistributedNotificationCenter.default().addObserver(
+            forName: Accessibility.trustChangedNotification, object: nil, queue: .main) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                MainActor.assumeIsolated { self?.syncDockClickMonitor() }
+            }
+        })
         resumeWindowRecords()
         rescheduleAutoPause()
         refresh()
@@ -178,23 +187,59 @@ final class AppListModel: ObservableObject {
         }
     }
 
-    /// The activation notification arrives while a frozen app is still stopped, so thawing
-    /// here is what lets a Dock click or Cmd-Tab bring it back. Applies to every frozen app,
-    /// however it was frozen.
+    /// The notification arrives while a frozen app is still stopped only when the system makes
+    /// it frontmost by itself (LaunchServices: `open -a`, Spotlight, Finder). A Dock click or
+    /// Cmd-Tab asks the app to activate itself, which a stopped app never does; the Dock click
+    /// is covered by `dockClickMonitor`. Applies to every frozen app, however it was frozen.
     private func didActivate(pid: pid_t) {
         frontPid = pid
-        if ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid) {
-            ProcessControl.resumeTree(root: pid)
-            PausedStore.shared.remove(pid: pid)
-            footprintAtPause[pid] = nil
-            reclaimSession.removeAll { $0 == pid }
-            lastFrontDate[pid] = Date()
-            refresh()
+        if isFrozen(pid) {
+            thaw(pid: pid)
         } else {
             lastFrontDate[pid] = Date()
+            // Cancels the timer of the frontmost app.
+            scheduleAutoPause(pid)
         }
-        // Cancels the timer of the frontmost app.
+    }
+
+    private func isFrozen(_ pid: pid_t) -> Bool {
+        ProcessControl.isStopped(pid) || PausedStore.shared.contains(pid: pid)
+    }
+
+    /// The one place a single frozen app is resumed: activation, a Dock click and Resume. It
+    /// leaves the Free Up Memory run too, so Restore does not count it.
+    private func thaw(pid: pid_t) {
+        ProcessControl.resumeTree(root: pid)
+        PausedStore.shared.remove(pid: pid)
+        footprintAtPause[pid] = nil
+        reclaimSession.removeAll { $0 == pid }
+        lastFrontDate[pid] = Date()
+        // Cancels the timer when `pid` is frontmost, restarts the idle clock otherwise.
         scheduleAutoPause(pid)
+        refresh()
+    }
+
+    /// Installs the Dock click monitor while an app is paused and Accessibility is granted,
+    /// removes it otherwise, so no global monitor runs without need.
+    private func syncDockClickMonitor() {
+        let wanted = entries.contains { $0.state == .paused } && Accessibility.isTrusted
+        if wanted, dockClickMonitor == nil {
+            dockClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
+                MainActor.assumeIsolated { self?.dockClicked() }
+            }
+        } else if !wanted, let monitor = dockClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            dockClickMonitor = nil
+        }
+    }
+
+    /// Thaws on mouse-down, before the Dock sends its activation request on mouse-up, so the
+    /// running app answers that request and comes forward.
+    private func dockClicked() {
+        guard let path = Accessibility.dockApplicationURL(at: Accessibility.pointerLocation)?.resolvingSymlinksInPath().path,
+              let app = listedApps().first(where: { $0.bundleURL?.resolvingSymlinksInPath().path == path }),
+              isFrozen(app.processIdentifier) else { return }
+        thaw(pid: app.processIdentifier)
     }
 
     /// The idle clock starts when an app leaves the front, not when it came there.
@@ -314,6 +359,7 @@ final class AppListModel: ObservableObject {
             return lhs.resident > rhs.resident
         }
         pausedCount = entries.filter { $0.state != .running }.count
+        syncDockClickMonitor()
         startLivePass(apps)
 
         let stats = SystemStats.current()
@@ -558,12 +604,7 @@ final class AppListModel: ObservableObject {
             return
         }
         guard let pid = entry.pid else { return }
-        ProcessControl.resumeTree(root: pid)
-        PausedStore.shared.remove(pid: pid)
-        footprintAtPause[pid] = nil
-        lastFrontDate[pid] = Date()
-        scheduleAutoPause(pid)
-        refresh()
+        thaw(pid: pid)
     }
 
     func deepSleep(_ entry: AppEntry) {

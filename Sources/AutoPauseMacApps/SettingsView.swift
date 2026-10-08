@@ -40,6 +40,8 @@ private struct GeneralSettingsView: View {
     let showOnboarding: () -> Void
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var loginError: String?
+    /// Re-read on activation: trust is granted in System Settings while this app runs.
+    @State private var trusted = Accessibility.isTrusted
 
     var body: some View {
         Form {
@@ -64,11 +66,36 @@ private struct GeneralSettingsView: View {
             }
 
             Section {
+                LabeledContent("Resume paused apps on click") {
+                    if trusted {
+                        Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    } else {
+                        Button("Allow Accessibility...") {
+                            Accessibility.requestTrust()
+                            trusted = Accessibility.isTrusted
+                        }
+                    }
+                }
+                if !trusted {
+                    Button("Open System Settings...") { Accessibility.openSettings() }
+                        .buttonStyle(.link)
+                }
+            } footer: {
+                Text("Needs Accessibility. With it, clicking a paused app in the Dock resumes it. Without it, a paused app resumes only from the menu-bar panel or when opened through Finder, Spotlight or open -a. Cmd-Tab does not resume it either way.")
+            }
+
+            Section {
                 Button("Show the Walkthrough Again") { showOnboarding() }
                 Link("Source and Docs on GitHub", destination: URL(string: "https://github.com/fazalrshah/auto-pause-mac-apps")!)
             }
         }
         .formStyle(.grouped)
-        .onAppear { launchAtLogin = LaunchAtLogin.isEnabled }
+        .onAppear {
+            launchAtLogin = LaunchAtLogin.isEnabled
+            trusted = Accessibility.isTrusted
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            trusted = Accessibility.isTrusted
+        }
     }
 }

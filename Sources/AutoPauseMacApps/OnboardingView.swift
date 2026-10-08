@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// First-run walkthrough: what the app does, Free Up Memory, and where the app lives plus start
-/// at login, so a menu-bar-only app with no Dock icon and no window does not just disappear on
-/// first launch.
+/// First-run walkthrough: what the app does, Free Up Memory, thawing paused apps (where
+/// Accessibility is asked for), and where the app lives plus start at login, so a menu-bar-only
+/// app with no Dock icon and no window does not just disappear on first launch.
 struct OnboardingView: View {
     let onFinish: () -> Void
 
@@ -11,7 +11,7 @@ struct OnboardingView: View {
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var loginError: String?
 
-    private let pageCount = 4
+    private let pageCount = 5
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,6 +20,7 @@ struct OnboardingView: View {
                 case 0: WelcomePage()
                 case 1: TiersPage()
                 case 2: ReclaimPage()
+                case 3: ThawPage()
                 default: FinishPage(launchAtLogin: $launchAtLogin, loginError: $loginError)
                 }
             }
@@ -246,6 +247,59 @@ private struct ReclaimPage: View {
             Spacer(minLength: 0)
         }
         .onAppear { shown = true }
+    }
+}
+
+/// Thawing on a Dock click needs Accessibility, so this page is where the app asks for it: with
+/// the reason on screen, not unannounced at launch.
+private struct ThawPage: View {
+    /// Re-read on activation: trust is granted in System Settings while this app runs.
+    @State private var trusted = Accessibility.isTrusted
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "dock.rectangle")
+                .font(.system(size: 44))
+                .foregroundStyle(Color.accentColor)
+                .padding(.top, 34)
+                .accessibilityHidden(true)
+
+            Text("Go back to a paused app")
+                .font(.system(size: 21, weight: .bold))
+
+            Text("A paused app cannot answer when it is asked to come forward.\nWith Accessibility, clicking its Dock icon resumes it first.\nWithout it, resume it from the panel or open it from Finder or Spotlight.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+
+            if trusted {
+                Label("Accessibility allowed", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.green)
+            } else {
+                Button("Allow Accessibility...") {
+                    Accessibility.requestTrust()
+                    trusted = Accessibility.isTrusted
+                }
+                .controlSize(.large)
+                // The system prompt appears at most once per app identity.
+                Button("Open System Settings") { Accessibility.openSettings() }
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+
+            Text("Optional: everything else works without it.\nSettings > General shows the state later.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 30)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            trusted = Accessibility.isTrusted
+        }
     }
 }
 

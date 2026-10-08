@@ -53,7 +53,9 @@ Everything that talks to the OS about processes. No UI, no state; pure functions
 
 **Design note — why no entitlements.** Apple's guidance is to use `libproc` (`proc_pid_rusage`,
 `proc_pidinfo`) rather than `task_for_pid()`, which is SIP-restricted to development tools.
-Everything here works on same-user processes with no entitlement, no root, no TCC prompt.
+Everything here works on same-user processes with no entitlement, no root, no TCC prompt. The
+one exception is opt-in: Accessibility, for resuming a paused app on a Dock click (see
+`Accessibility.swift`); without it nothing is asked and nothing changes.
 
 ---
 
@@ -134,13 +136,29 @@ the sheet stays answerable) and posts "<name> did not quit (unsaved changes?) an
   bundle IDs still flagged `excludedFromReclaim` in `settings.json` (an older Free Up Memory
   opt-out) are appended to the list and the flag cleared
   (`AppSettingsStore.takeExcludedFromReclaim`).
-- **Thaw on activation** — when `didActivateApplicationNotification` names a frozen pid (in
-  `PausedStore` or stopped), the whole tree is resumed, its record dropped, its idle clock
-  reset and the pid removed from `reclaimSession`. This covers every frozen app, whether
-  auto-paused, paused by hand or by Free Up Memory. The notification arrives while the app is
-  still stopped; requests that go through the app itself (`NSRunningApplication.activate()`,
-  `osascript ... activate`) produce no notification and are lost. Clicking the app that is
-  already frontmost activates nothing either, which is why `freeze` refuses the frontmost app.
+- **Thaw** - `thaw(pid:)` is the one place a single frozen app is resumed: the whole tree is
+  resumed, its record dropped, its footprint baseline cleared, the pid removed from
+  `reclaimSession` (so Restore does not count it), its idle clock reset and its auto-pause timer
+  rescheduled (cancelled when it is frontmost). Resume, activation and a Dock click call it;
+  Resume All and Restore resume their own sets.
+- **Thaw on activation** - when `didActivateApplicationNotification` names a frozen pid (in
+  `PausedStore` or stopped), `didActivate` calls `thaw(pid:)`. This covers every frozen app,
+  whether auto-paused, paused by hand or by Free Up Memory. The notification arrives while the
+  app is still stopped only when the system makes the app frontmost by itself: LaunchServices
+  (`open -a`, Spotlight, a double-click in Finder). Requests that go through the app itself
+  (a Dock click on a running app, Cmd-Tab, `NSRunningApplication.activate()`,
+  `osascript ... activate`) are never processed by a stopped app, produce no notification and
+  are lost. Clicking the app that is already frontmost activates nothing either, which is why
+  `freeze` refuses the frontmost app.
+- **Thaw on Dock click** - `syncDockClickMonitor()` (called on every refresh and when
+  Accessibility trust changes, via the `com.apple.accessibility.api` distributed notification)
+  installs a global `.leftMouseDown` monitor while at least one app is paused and Accessibility
+  is granted, and removes it otherwise. On a click, `Accessibility.dockApplicationURL(at:)`
+  names the application Dock tile under the pointer; if a listed app with that bundle URL is
+  frozen, `thaw(pid:)` resumes it. This runs on mouse-down, before the Dock sends its activation
+  request on mouse-up, so the resumed app answers that request and comes forward. Cmd-Tab stays
+  uncovered: the switcher lives in the Dock process, and no permission yields a notification
+  naming the app it is about to activate.
 - **Frontmost app** - `frontPid` (`@Published`) is set by `didActivate` and cleared by
   `didDeactivate`, so rows re-render when the front app changes while the panel is open;
   `isFrontmost(_:)` is what `freeze` and the views check. The panel does not activate Auto
@@ -235,6 +253,19 @@ behaving correctly — and it's exactly why per-app *resident* memory is the hon
 
 ---
 
+## `Accessibility.swift` - opt-in Accessibility
+
+Trust check (`isTrusted`), the one-time system prompt (`requestTrust`), the System Settings
+pane (`openSettings`), `element(pid:)` with a 0.25 s messaging timeout (an AX call blocks until
+the target answers; a stopped app never does, so no AX call goes to a frozen app), and
+`dockApplicationURL(at:)`: it checks with `CGWindowListCopyWindowInfo` that the point lies in a
+window of the Dock process at the Dock window level, so a click elsewhere costs no AX call, then
+hit-tests the Dock's AX element and returns `kAXURLAttribute` of an `AXApplicationDockItem`.
+Only the Dock is asked; it is never frozen. Used by `AppListModel` (Dock click monitor),
+`SettingsView` and `OnboardingView`.
+
+---
+
 ## Persistence — three small stores
 
 All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable across the rename — see the naming note below).
@@ -255,12 +286,12 @@ All atomic JSON in `~/Library/Application Support/Pause/` (path kept stable acro
 | `DetailViews.swift` | `SparklineView` (scaled from 0 to the window's maximum, so noise stays small), `CPUSparklineView` (linear from 0 to max(100 %, peak), so an app idling at a fraction of a percent stays flat; the CPU busy threshold, 10 % by default, is drawn as a dashed line while that condition is on), `UsageAreaChart` (plotted against total RAM so normal fluctuation looks normal, not like a mountain range), and the per-app detail popover: "1.2 GB in RAM, 1.5 GB footprint, 12% CPU", memory history, a 60 pt CPU graph (running apps), the live state under the graph (every busy reason one per line, the reasons Force was armed with while armed, or the idle line; none for paused or never-freeze apps), auto-pause settings (for a never-freeze app "On the Never freeze list" in their place, and no Pause) and Pause/Resume through `GatedButton` (hourglass badge while shown busy, Pause disabled for the frontmost app, as in the row). |
 | `SystemDetailView.swift` | Ring gauge (RAM used), "Memory Pressure" with the kernel level (when it cannot be read: "Memory used" with no pressure word), usage history, breakdown bar and rows App, Wired, Compressed, Cached Files, Free, Other (summing to total), then a separated Available (no segment, help text calls it an estimate) and Swap Used, top 6 apps by resident memory (slept apps left out). |
 | `ReclaimView.swift` | Free Up Memory: a reviewable checklist of what will be paused, with running totals, before anything happens. Never-freeze apps are not offered. Busy apps (checked in one pass on open; the confirm button waits for it) start unticked with the reason as subtitle. Recording and call apps start unticked. The header says how many running apps are not offered because of the Never freeze list; the total reads "Up to X reclaimable"; the confirm button uses the default accent. When "Add the unticked apps to Never freeze" is ticked (off by default), the unticked apps that are not busy are appended to `neverFreeze`. |
-| `SettingsView.swift` | The SwiftUI `Settings` scene: a window with the tabs General (start at login; walkthrough; GitHub link), Busy Conditions and Never Freeze. A window rather than popover pages: the regex list and app lists outgrow a popover, which also closes as soon as focus moves. A zero-size `WindowAccessor` background hands the window to `WindowPlacement.settingsWindow` (SwiftUI offers no public handle to it) and places it when SwiftUI first creates it. |
+| `SettingsView.swift` | The SwiftUI `Settings` scene: a window with the tabs General (start at login; "Resume paused apps on click", the Accessibility state with "Allow Accessibility..." and a System Settings link until granted, re-read when Auto Pause becomes active; walkthrough; GitHub link), Busy Conditions and Never Freeze. A window rather than popover pages: the regex list and app lists outgrow a popover, which also closes as soon as focus moves. A zero-size `WindowAccessor` background hands the window to `WindowPlacement.settingsWindow` (SwiftUI offers no public handle to it) and places it when SwiftUI first creates it. |
 | `BusySettingsView.swift` | Settings > Busy Conditions: one checkbox per condition, CPU threshold, and the editable regex list (invalid entries are marked and not saved). |
 | `NeverFreezeSettingsView.swift` | Settings > Never Freeze: the list with app name and icon where the app is installed (`urlForApplication(withBundleIdentifier:)`), else the bundle ID; remove buttons, "Add running app..." (listed apps not on the list) and "Restore defaults". |
 | `DeepSleepWarningView.swift` | Warning before a Deep Sleep: explains Deep Sleep actually quits the app, reports that app's restore status, offers to enable window restore. Shown every time unless the app's restore status is `.good` and the warning was confirmed once (`PauseFlags.hasSeenDeepSleepWarning`). |
 | `PauseApp.swift` | `MenuBarExtra` and `Settings` scenes plus the `NSApplicationDelegate`. Presents the first-run walkthrough in a real `NSWindow`, and resumes every frozen app on quit so nothing is ever stranded. `WindowPlacement.present` shows the walkthrough and the Settings window: `.moveToActiveSpace` so activation does not switch back to the Space the window was last on, an explicit origin centered on the target screen (default: the screen under the pointer) when the window is hidden or on another screen (`.moveToActiveSpace` keeps the frame, so with several displays the window would stay on the old screen; a window already visible on that screen keeps the position it was dragged to), then `makeKeyAndOrderFront` and `NSApp.activate` (an `LSUIElement` app is not active, so the window would open behind the frontmost app). |
-| `OnboardingView.swift` | Four-page animated walkthrough: welcome, the two tiers, Free Up Memory (an illustrated checklist with "up to X can be reclaimed"), and where to find the app + start-at-login. Exists because a menu-bar-only app with no Dock icon is easy to lose immediately after installing. |
+| `OnboardingView.swift` | Five-page animated walkthrough: welcome, the two tiers, Free Up Memory (an illustrated checklist with "up to X can be reclaimed"), resuming a paused app on a Dock click (the Accessibility request: "Allow Accessibility..." shows the system prompt, a link opens the Privacy & Security pane, a check mark once granted; optional), and where to find the app + start-at-login. Exists because a menu-bar-only app with no Dock icon is easy to lose immediately after installing. |
 | `LaunchAtLogin.swift` | `SMAppService.mainApp` wrapper. Registration is idempotent (registering when already enabled throws), and the status is read back afterwards — `register()` can succeed while the item still needs approval, or not take effect when the app runs from a DMG or build folder. |
 
 > **Naming note.** The product is *Auto Pause Mac Apps*; the UI and `CFBundleName` /
